@@ -178,25 +178,29 @@ app.post("/api/generate-image", async (req, res) => {
     // Размеры DALL-E 3: 1024x1024, 1024x1792 (вертикаль), 1792x1024 (гориз.)
     const imgSize = size || "1024x1792"; // вертикаль для Shorts
 
-    const result = await openai.images.generate({
-  model: "dall-e-3",
-  prompt: prompt + " — high quality, cinematic, no text, no watermark",
+    const imgSize = size || "1024x1536";
+
+const result = await openai.images.generate({
+  model: "gpt-image-1",
+  prompt: prompt + " — high quality, cinematic, vertical 9:16, no text, no watermark",
   n: 1,
   size: imgSize,
 });
 
-const imageUrl = result.data[0].url;
-if (!imageUrl) {
-  return res.status(500).json({ error: "OpenAI не вернул URL изображения" });
-}
+const imageUrl = result.data?.[0]?.url;
+const b64 = result.data?.[0]?.b64_json;
 
-const imageResp = await fetch(imageUrl);
-if (!imageResp.ok) {
-  return res.status(500).json({ error: "Не удалось скачать изображение из OpenAI" });
-}
+let buffer;
 
-const arrayBuffer = await imageResp.arrayBuffer();
-const buffer = Buffer.from(arrayBuffer);
+if (b64) {
+  buffer = Buffer.from(b64, "base64");
+} else if (imageUrl) {
+  const imageResp = await fetch(imageUrl);
+  if (!imageResp.ok) throw new Error("Failed to download generated image");
+  buffer = Buffer.from(await imageResp.arrayBuffer());
+} else {
+  throw new Error("OpenAI did not return image data");
+}
 
 res.set("Content-Type", "image/png");
 res.send(buffer);
