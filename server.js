@@ -179,15 +179,27 @@ app.post("/api/generate-image", async (req, res) => {
     const imgSize = size || "1024x1792"; // вертикаль для Shorts
 
     const result = await openai.images.generate({
-      model: "dall-e-3",
-      prompt: prompt + " — high quality, cinematic, no text, no watermark",
-      n: 1,
-      size: imgSize,
-      response_format: "b64_json",
-    });
+  model: "dall-e-3",
+  prompt: prompt + " — high quality, cinematic, no text, no watermark",
+  n: 1,
+  size: imgSize,
+});
 
-    const b64 = result.data[0].b64_json;
-    const buffer = Buffer.from(b64, "base64");
+const imageUrl = result.data[0].url;
+if (!imageUrl) {
+  return res.status(500).json({ error: "OpenAI не вернул URL изображения" });
+}
+
+const imageResp = await fetch(imageUrl);
+if (!imageResp.ok) {
+  return res.status(500).json({ error: "Не удалось скачать изображение из OpenAI" });
+}
+
+const arrayBuffer = await imageResp.arrayBuffer();
+const buffer = Buffer.from(arrayBuffer);
+
+res.set("Content-Type", "image/png");
+res.send(buffer);
 
     res.set("Content-Type", "image/png");
     res.send(buffer);
