@@ -135,7 +135,6 @@ app.post("/api/scene-prompts", async (req, res) => {
         { role: "user", content: `Сценарий:\n${script}\n\nВерни JSON-массив сцен.` },
       ],
       max_tokens: 1200,
-      response_format: { type: "json_object" },
     });
 
     let raw = completion.choices[0].message.content.trim();
