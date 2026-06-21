@@ -176,7 +176,6 @@ app.post("/api/generate-image", async (req, res) => {
     if (!prompt) return res.status(400).json({ error: "Нужен prompt" });
 
     // Размеры DALL-E 3: 1024x1024, 1024x1792 (вертикаль), 1792x1024 (гориз.)
-    const imgSize = size || "1024x1792"; // вертикаль для Shorts
 
     const imgSize = size || "1024x1536";
 
@@ -205,8 +204,6 @@ if (b64) {
 res.set("Content-Type", "image/png");
 res.send(buffer);
 
-    res.set("Content-Type", "image/png");
-    res.send(buffer);
   } catch (e) {
     console.error("generate-image error:", e.message);
     res.status(500).json({ error: e.message });
