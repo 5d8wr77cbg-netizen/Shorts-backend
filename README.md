@@ -186,3 +186,5 @@ curl -X POST http://localhost:4000/api/anim/render -H 'Content-Type: application
   `ELEVENLABS_MODEL` (`eleven_multilingual_v2`), `ELEVENLABS_STABILITY` (`0.5`)
 - `SFX_VOLUME` (`0.5`) — громкость звуковых эффектов длинных роликов (свуши, удары, монеты,
   дождь, гул кофейни…; все звуки синтезируются кодом, `lib/longform/sfx.js`); `SFX=0` — выключить
+- `MUSIC_BED=0` — выключить свою фоновую музыку длинных роликов (`lib/longform/music.js`: тихий эмбиент,
+  настроение по главам, приглушается под голосом). Если загружен свой трек — играет он
