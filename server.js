@@ -8,6 +8,9 @@
 //    POST /api/generate-image — генерация картинки (DALL-E 3)
 //    POST /api/tts          — озвучка текста (OpenAI TTS)
 //    POST /api/build-video  — сборка финального MP4 через FFmpeg
+//    POST /api/minimal/ideas  — идеи роликов про деньги в стиле "minimal"
+//    POST /api/minimal/plan   — сценарий ролика в стиле "minimal"
+//    POST /api/minimal/render — весь ролик "под ключ": план → картинки → MP4
 // ============================================================================
 
 import express from "express";
@@ -16,11 +19,12 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
 import multer from "multer";
 import ffmpegPath from "ffmpeg-static";
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import { buildVideo } from "./lib/video.js";
+import { minimalImagePrompt, planSystemPrompt, ideasSystemPrompt, normalizePlan } from "./lib/minimal.js";
 
 dotenv.config();
 
@@ -53,20 +57,6 @@ if (!fs.existsSync(TMP)) fs.mkdirSync(TMP, { recursive: true });
 
 // multer — для приёма загруженных файлов (картинки/аудио со сцен)
 const upload = multer({ dest: TMP, limits: { fileSize: 15 * 1024 * 1024 } });
-
-// ── Helper: запуск ffmpeg как промис ────────────────────────────────────────
-function runFfmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, args);
-    let stderr = "";
-    proc.stderr.on("data", (d) => { stderr += d.toString(); });
-    proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error("FFmpeg error:\n" + stderr.slice(-1500)));
-    });
-    proc.on("error", reject);
-  });
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 //  GET /health
@@ -166,44 +156,38 @@ app.post("/api/scene-prompts", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-//  POST /api/generate-image  — DALL-E 3
-//  body: { prompt, size? }
+//  POST /api/generate-image  — gpt-image-1
+//  body: { prompt, size?, style? }   style: "minimal" — белые 3D-человечки на чёрном
 //  returns: image/png (binary)
 // ════════════════════════════════════════════════════════════════════════════
-app.post("/api/generate-image", async (req, res) => {
-  try {
-    const { prompt, size } = req.body;
-    if (!prompt) return res.status(400).json({ error: "Нужен prompt" });
+async function generateImage(prompt, { size, style } = {}) {
+  const result = await openai.images.generate({
+    model: "gpt-image-1",
+    prompt: style === "minimal"
+      ? minimalImagePrompt(prompt)
+      : prompt + " — high quality, cinematic, vertical 9:16, no text, no watermark",
+    n: 1,
+    size: size || "1024x1536",
+  });
 
-    // Размеры DALL-E 3: 1024x1024, 1024x1792 (вертикаль), 1792x1024 (гориз.)
+  const b64 = result.data?.[0]?.b64_json;
+  if (b64) return Buffer.from(b64, "base64");
 
-    const imgSize = size || "1024x1536";
-
-const result = await openai.images.generate({
-  model: "gpt-image-1",
-  prompt: prompt + " — high quality, cinematic, vertical 9:16, no text, no watermark",
-  n: 1,
-  size: imgSize,
-});
-
-const imageUrl = result.data?.[0]?.url;
-const b64 = result.data?.[0]?.b64_json;
-
-let buffer;
-
-if (b64) {
-  buffer = Buffer.from(b64, "base64");
-} else if (imageUrl) {
+  const imageUrl = result.data?.[0]?.url;
+  if (!imageUrl) throw new Error("OpenAI did not return image data");
   const imageResp = await fetch(imageUrl);
   if (!imageResp.ok) throw new Error("Failed to download generated image");
-  buffer = Buffer.from(await imageResp.arrayBuffer());
-} else {
-  throw new Error("OpenAI did not return image data");
+  return Buffer.from(await imageResp.arrayBuffer());
 }
 
-res.set("Content-Type", "image/png");
-res.send(buffer);
+app.post("/api/generate-image", async (req, res) => {
+  try {
+    const { prompt, size, style } = req.body;
+    if (!prompt) return res.status(400).json({ error: "Нужен prompt" });
 
+    const buffer = await generateImage(prompt, { size, style });
+    res.set("Content-Type", "image/png");
+    res.send(buffer);
   } catch (e) {
     console.error("generate-image error:", e.message);
     res.status(500).json({ error: e.message });
@@ -238,15 +222,32 @@ app.post("/api/tts", async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 //  POST /api/build-video  — сборка финального MP4 через FFmpeg
 //  Принимает multipart/form-data:
-//    - field "manifest": JSON [{ duration, subtitle }] по сценам
+//    - field "manifest": JSON [{ duration, subtitle | caption, highlight?, labels? }] по сценам
 //    - files "images": картинки по сценам (по порядку)
 //    - files "audios": аудио по сценам (опционально, по порядку)
+//    - file  "music": фоновая музыка (опционально)
 //    - field "format": "9:16" | "16:9" | "1:1"
+//    - field "style": "classic" (по умолчанию) | "minimal"
+//    - field "musicVolume": 0..1 (по умолчанию 0.25)
 //  returns: video/mp4 (binary)
 // ════════════════════════════════════════════════════════════════════════════
+function sendVideo(res, outPath, jobDir) {
+  res.set("Content-Type", "video/mp4");
+  const stream = fs.createReadStream(outPath);
+  stream.pipe(res);
+  stream.on("close", () => {
+    // Чистим временные файлы
+    fs.rm(jobDir, { recursive: true, force: true }, () => {});
+  });
+}
+
 app.post(
   "/api/build-video",
-  upload.fields([{ name: "images", maxCount: 12 }, { name: "audios", maxCount: 12 }]),
+  upload.fields([
+    { name: "images", maxCount: 12 },
+    { name: "audios", maxCount: 12 },
+    { name: "music", maxCount: 1 },
+  ]),
   async (req, res) => {
     const jobId = "job_" + Date.now();
     const jobDir = path.join(TMP, jobId);
@@ -254,95 +255,34 @@ app.post(
 
     try {
       const manifest = JSON.parse(req.body.manifest || "[]");
-      const format = req.body.format || "9:16";
-      const dims = { "9:16": [1080, 1920], "16:9": [1920, 1080], "1:1": [1080, 1080] }[format] || [1080, 1920];
-      const [W, H] = dims;
-
-      const images = (req.files.images || []).sort((a, b) => a.originalname.localeCompare(b.originalname));
-      const audios = (req.files.audios || []).sort((a, b) => a.originalname.localeCompare(b.originalname));
+      const files = req.files || {};
+      const images = (files.images || []).sort((a, b) => a.originalname.localeCompare(b.originalname));
+      const audios = (files.audios || []).sort((a, b) => a.originalname.localeCompare(b.originalname));
 
       if (images.length === 0) {
+        fs.rm(jobDir, { recursive: true, force: true }, () => {});
         return res.status(400).json({ error: "Нет картинок для сборки" });
       }
 
-      // 1) Готовим список клипов: каждая картинка → видеосегмент нужной длины
-      const segmentPaths = [];
-      for (let i = 0; i < images.length; i++) {
-        const img = images[i];
-        const dur = manifest[i]?.duration || 4;
-        const subtitle = (manifest[i]?.subtitle || "").replace(/'/g, "\u2019").replace(/:/g, " ");
-        const segPath = path.join(jobDir, `seg_${String(i).padStart(2, "0")}.mp4`);
+      const scenes = images.map((img, i) => ({
+        imagePath: img.path,
+        audioPath: audios[i]?.path,
+        duration: Math.min(Math.max(+manifest[i]?.duration || 4, 1), 30),
+        caption: manifest[i]?.caption || manifest[i]?.subtitle || "",
+        highlight: manifest[i]?.highlight,
+        labels: manifest[i]?.labels,
+      }));
 
-        // Масштабируем картинку под формат + добавляем субтитр снизу
-        const vf = [
-          `scale=${W}:${H}:force_original_aspect_ratio=increase`,
-          `crop=${W}:${H}`,
-          // subtitle через drawtext
-          subtitle
-            ? `drawtext=text='${subtitle}':fontcolor=white:fontsize=${Math.round(W * 0.045)}:` +
-              `box=1:boxcolor=black@0.6:boxborderw=20:x=(w-text_w)/2:y=h-h*0.18`
-            : null,
-        ].filter(Boolean).join(",");
-
-        const args = [
-          "-y",
-          "-loop", "1",
-          "-i", img.path,
-        ];
-
-        // Если есть аудио для сцены — подмешиваем
-        const audio = audios[i];
-        if (audio) {
-          args.push("-i", audio.path);
-        }
-
-        args.push(
-          "-t", String(dur),
-          "-vf", vf,
-          "-r", "30",
-          "-pix_fmt", "yuv420p",
-          "-c:v", "libx264",
-          "-preset", "veryfast",
-        );
-
-        if (audio) {
-          args.push("-c:a", "aac", "-shortest");
-        } else {
-          // тишина, чтобы все сегменты имели аудиодорожку (для concat)
-          args.splice(args.indexOf("-loop"), 0, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
-          args.push("-c:a", "aac", "-shortest");
-        }
-
-        args.push(segPath);
-        await runFfmpeg(args);
-        segmentPaths.push(segPath);
-      }
-
-      // 2) Конкатенация всех сегментов
-      const listFile = path.join(jobDir, "list.txt");
-      fs.writeFileSync(listFile, segmentPaths.map((p) => `file '${p}'`).join("\n"));
-
-      const outPath = path.join(jobDir, "final.mp4");
-      await runFfmpeg([
-        "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", listFile,
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        outPath,
-      ]);
-
-      // 3) Отдаём готовый MP4
-      res.set("Content-Type", "video/mp4");
-      const stream = fs.createReadStream(outPath);
-      stream.pipe(res);
-      stream.on("close", () => {
-        // Чистим временные файлы
-        fs.rm(jobDir, { recursive: true, force: true }, () => {});
+      const outPath = await buildVideo({
+        scenes,
+        jobDir,
+        format: req.body.format || "9:16",
+        style: req.body.style === "minimal" ? "minimal" : "classic",
+        musicPath: files.music?.[0]?.path,
+        musicVolume: Math.min(Math.max(+req.body.musicVolume || 0.25, 0), 1),
       });
+
+      sendVideo(res, outPath, jobDir);
     } catch (e) {
       console.error("build-video error:", e.message);
       fs.rm(jobDir, { recursive: true, force: true }, () => {});
@@ -350,6 +290,101 @@ app.post(
     }
   }
 );
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Стиль "minimal": ролики про деньги в формате «3D-человечки на чёрном фоне»
+// ════════════════════════════════════════════════════════════════════════════
+async function chatJson(system, user, maxTokens = 1500) {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    max_tokens: maxTokens,
+    temperature: 0.9,
+  });
+  return JSON.parse(completion.choices[0].message.content);
+}
+
+async function makeMinimalPlan({ topic, language, scenes }) {
+  const count = Math.min(Math.max(+scenes || 3, 2), 6);
+  const plan = await chatJson(
+    planSystemPrompt({ language: language || "en", scenes: count }),
+    topic ? `Topic: ${topic}` : "Pick one strong money truth yourself (not the most obvious one)."
+  );
+  const normalized = normalizePlan(plan, count);
+  if (!normalized.scenes.length) throw new Error("GPT не вернул сцены");
+  return normalized;
+}
+
+//  POST /api/minimal/ideas  body: { language?, count? }  → { ideas: [{topic, metaphor}] }
+app.post("/api/minimal/ideas", async (req, res) => {
+  try {
+    const { language, count } = req.body;
+    const n = Math.min(Math.max(+count || 10, 1), 30);
+    const data = await chatJson(ideasSystemPrompt({ language: language || "en", count: n }), "Give the ideas.", 2000);
+    res.json({ ideas: Array.isArray(data.ideas) ? data.ideas : [] });
+  } catch (e) {
+    console.error("minimal/ideas error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+//  POST /api/minimal/plan  body: { topic?, language?, scenes? }
+//  → { title, description, hashtags, scenes: [{caption, highlight, labels, imagePrompt, duration}] }
+//  Картинки для сцен: POST /api/generate-image { prompt: imagePrompt, style: "minimal" }
+//  Сборка: POST /api/build-video со style=minimal и manifest = scenes
+app.post("/api/minimal/plan", async (req, res) => {
+  try {
+    res.json(await makeMinimalPlan(req.body));
+  } catch (e) {
+    console.error("minimal/plan error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+//  POST /api/minimal/render  — весь ролик за один запрос (занимает 1–3 минуты)
+//  multipart/form-data или JSON: { topic?, language?, scenes?, format? } + file "music" (опционально)
+//  returns: video/mp4, план ролика — в заголовке X-Short-Plan (JSON, URI-encoded)
+app.post("/api/minimal/render", upload.single("music"), async (req, res) => {
+  const jobId = "job_" + Date.now();
+  const jobDir = path.join(TMP, jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+
+  try {
+    const plan = await makeMinimalPlan(req.body);
+
+    const images = await Promise.all(
+      plan.scenes.map((s) => generateImage(s.imagePrompt, { style: "minimal" }))
+    );
+    const scenes = plan.scenes.map((s, i) => {
+      const imagePath = path.join(jobDir, `img_${i}.png`);
+      fs.writeFileSync(imagePath, images[i]);
+      return { ...s, imagePath };
+    });
+
+    const outPath = await buildVideo({
+      scenes,
+      jobDir,
+      format: req.body.format || "9:16",
+      style: "minimal",
+      musicPath: req.file?.path,
+      musicVolume: Math.min(Math.max(+req.body.musicVolume || 0.6, 0), 1),
+    });
+
+    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    res.set("X-Short-Plan", encodeURIComponent(JSON.stringify(plan)));
+    res.set("Access-Control-Expose-Headers", "X-Short-Plan");
+    sendVideo(res, outPath, jobDir);
+  } catch (e) {
+    console.error("minimal/render error:", e.message);
+    fs.rm(jobDir, { recursive: true, force: true }, () => {});
+    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 //  POST /api/generate-text  — универсальный текст (для идей, плана, субтитров)

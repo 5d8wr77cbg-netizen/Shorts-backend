@@ -1,5 +1,10 @@
 FROM node:20-slim
 
+# Шрифты для текста в видео (libass ищет их через fontconfig)
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends fontconfig fonts-inter fonts-dejavu-core \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY package*.json ./
