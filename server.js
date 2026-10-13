@@ -15,12 +15,14 @@
 //    POST /api/minimal/render — весь ролик "под ключ": план → анимация → MP4
 //    GET  /api/anim/templates — список анимированных сцен
 //    POST /api/anim/render    — собрать ролик из анимированных сцен (без GPT)
+//    POST /api/jobs           — то же в фоне: { id } → GET /api/jobs/:id, /api/jobs/:id/video
 // ============================================================================
 
 import "dotenv/config"; // первым: ключи нужны модулям ниже при импорте
 import express from "express";
 import cors from "cors";
 import fs from "fs";
+import crypto from "crypto";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
@@ -35,6 +37,7 @@ import { renderClip } from "./lib/anim/render.js";
 import { FORMATS } from "./lib/video.js";
 import { chat, chatJson, requireOpenAI, LLM_PROVIDER, LLM_MODEL } from "./lib/llm.js";
 import { libraryPlan, libraryIdeas } from "./lib/phrases.js";
+import { createLimiter } from "./lib/queue.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -68,6 +71,9 @@ if (!fs.existsSync(TMP)) fs.mkdirSync(TMP, { recursive: true });
 
 // multer — для приёма загруженных файлов (картинки/аудио со сцен)
 const upload = multer({ dest: TMP, limits: { fileSize: 15 * 1024 * 1024 } });
+
+// Сколько роликов собирать одновременно. На сервере с 512 МБ — только 1.
+const renderSlot = createLimiter(Math.max(1, +process.env.RENDER_CONCURRENCY || 1));
 
 // ════════════════════════════════════════════════════════════════════════════
 //  GET /health
@@ -386,47 +392,72 @@ app.post("/api/minimal/plan", async (req, res) => {
   }
 });
 
-//  POST /api/minimal/render  — весь ролик за один запрос
-//  multipart/form-data или JSON: { topic?, language?, engine?, template?, scenes?, format?, musicVolume? }
-//  + file "music" (опционально)
-//  returns: video/mp4, план ролика — в заголовке X-Short-Plan (JSON, URI-encoded)
-app.post("/api/minimal/render", upload.single("music"), async (req, res) => {
-  const jobId = "job_" + Date.now();
-  const jobDir = path.join(TMP, jobId);
+class BadRequest extends Error {
+  constructor(msg) { super(msg); this.status = 400; }
+}
+
+// Проверка своих сцен до постановки в очередь
+function customScenes(body) {
+  if (body.scenes === undefined || body.scenes === "") return null;
+  const scenes = parseJsonField(body.scenes, []);
+  if (!Array.isArray(scenes) || scenes.length === 0) throw new BadRequest("Нужен массив scenes: [{ template, captions }]");
+  if (scenes.length > 6) throw new BadRequest("Максимум 6 сцен");
+  const unknown = scenes.find((s) => !TEMPLATES[s?.template]);
+  if (unknown) throw new BadRequest(`Неизвестная сцена: ${unknown?.template}. Список: GET /api/anim/templates`);
+  return scenes;
+}
+
+// Собирает ролик: свои сцены (body.scenes) или план от ИИ / библиотеки.
+// Возвращает { outPath, plan }.
+async function produceVideo(body, { jobDir, musicPath }) {
+  const format = body.format || "9:16";
+  const musicVolume = Math.min(Math.max(+body.musicVolume || 0.6, 0), 1);
+  const own = customScenes(body);
+  if (own) {
+    const outPath = await renderAnimScenes(own, { jobDir, format, musicPath, musicVolume });
+    return { outPath, plan: { engine: "anim", source: "custom", scenes: own } };
+  }
+
+  const plan = await makeMinimalPlan(body);
+  if (plan.engine === "anim") {
+    return { outPath: await renderAnimScenes(plan.scenes, { jobDir, format, musicPath, musicVolume }), plan };
+  }
+  const images = await Promise.all(
+    plan.scenes.map((s) => generateImage(s.imagePrompt, { style: "minimal" }))
+  );
+  const scenes = plan.scenes.map((s, i) => {
+    const imagePath = path.join(jobDir, `img_${i}.png`);
+    fs.writeFileSync(imagePath, images[i]);
+    return { ...s, imagePath };
+  });
+  return { outPath: await buildVideo({ scenes, jobDir, format, style: "minimal", musicPath, musicVolume }), plan };
+}
+
+// Синхронный вариант: ответ — сразу MP4 (удобно для curl)
+async function renderNow(req, res, label) {
+  const jobDir = path.join(TMP, "job_" + crypto.randomUUID());
   fs.mkdirSync(jobDir, { recursive: true });
-
+  const musicPath = req.file?.path;
   try {
-    const plan = await makeMinimalPlan(req.body);
-    const format = req.body.format || "9:16";
-    const musicPath = req.file?.path;
-    const musicVolume = Math.min(Math.max(+req.body.musicVolume || 0.6, 0), 1);
-
-    let outPath;
-    if (plan.engine === "anim") {
-      outPath = await renderAnimScenes(plan.scenes, { jobDir, format, musicPath, musicVolume });
-    } else {
-      const images = await Promise.all(
-        plan.scenes.map((s) => generateImage(s.imagePrompt, { style: "minimal" }))
-      );
-      const scenes = plan.scenes.map((s, i) => {
-        const imagePath = path.join(jobDir, `img_${i}.png`);
-        fs.writeFileSync(imagePath, images[i]);
-        return { ...s, imagePath };
-      });
-      outPath = await buildVideo({ scenes, jobDir, format, style: "minimal", musicPath, musicVolume });
-    }
-
-    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    customScenes(req.body);
+    const { outPath, plan } = await renderSlot.run(() => produceVideo(req.body, { jobDir, musicPath }));
+    if (musicPath) fs.rm(musicPath, { force: true }, () => {});
     res.set("X-Short-Plan", encodeURIComponent(JSON.stringify(plan)));
     res.set("Access-Control-Expose-Headers", "X-Short-Plan");
     sendVideo(res, outPath, jobDir);
   } catch (e) {
-    console.error("minimal/render error:", e.message);
+    console.error(`${label} error:`, e.message);
     fs.rm(jobDir, { recursive: true, force: true }, () => {});
-    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+    if (musicPath) fs.rm(musicPath, { force: true }, () => {});
     res.status(e.status || 500).json({ error: e.message });
   }
-});
+}
+
+//  POST /api/minimal/render  — весь ролик за один запрос
+//  multipart/form-data или JSON: { topic?, language?, engine?, template?, scenes?, format?, musicVolume? }
+//  + file "music" (опционально)
+//  returns: video/mp4, план ролика — в заголовке X-Short-Plan (JSON, URI-encoded)
+app.post("/api/minimal/render", upload.single("music"), (req, res) => renderNow(req, res, "minimal/render"));
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Анимированные сцены (lib/anim) — работают без OpenAI
@@ -445,44 +476,98 @@ app.get("/api/anim/templates", (req, res) => {
 //  JSON или multipart: { scenes: [{ template, duration?, labels?, captions: [{text, highlight?}] }],
 //                        format?, musicVolume? } + file "music" (опционально)
 //  returns: video/mp4
-app.post("/api/anim/render", upload.single("music"), async (req, res) => {
-  const jobId = "job_" + Date.now();
-  const jobDir = path.join(TMP, jobId);
-  fs.mkdirSync(jobDir, { recursive: true });
-  const cleanup = () => {
-    fs.rm(jobDir, { recursive: true, force: true }, () => {});
+app.post("/api/anim/render", upload.single("music"), (req, res) => {
+  if (req.body.scenes === undefined || req.body.scenes === "") {
     if (req.file) fs.rm(req.file.path, { force: true }, () => {});
-  };
-
-  try {
-    const scenes = parseJsonField(req.body.scenes, []);
-    if (!Array.isArray(scenes) || scenes.length === 0) {
-      cleanup();
-      return res.status(400).json({ error: "Нужен массив scenes: [{ template, captions }]" });
-    }
-    if (scenes.length > 6) {
-      cleanup();
-      return res.status(400).json({ error: "Максимум 6 сцен" });
-    }
-    const unknown = scenes.find((s) => !TEMPLATES[s?.template]);
-    if (unknown) {
-      cleanup();
-      return res.status(400).json({ error: `Неизвестная сцена: ${unknown?.template}. Список: GET /api/anim/templates` });
-    }
-
-    const outPath = await renderAnimScenes(scenes, {
-      jobDir,
-      format: req.body.format || "9:16",
-      musicPath: req.file?.path,
-      musicVolume: Math.min(Math.max(+req.body.musicVolume || 0.6, 0), 1),
-    });
-    if (req.file) fs.rm(req.file.path, { force: true }, () => {});
-    sendVideo(res, outPath, jobDir);
-  } catch (e) {
-    console.error("anim/render error:", e.message);
-    cleanup();
-    res.status(e.status || 500).json({ error: e.message });
+    return res.status(400).json({ error: "Нужен массив scenes: [{ template, captions }]" });
   }
+  renderNow(req, res, "anim/render");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Фоновые задачи: на медленном сервере сборка идёт минуты, а телефон может
+//  заблокироваться или закрыть вкладку. Задача живёт на сервере, страница
+//  просто спрашивает её статус.
+//    POST /api/jobs            — те же поля, что у /api/minimal/render → 202 { id }
+//    GET  /api/jobs/:id        — { status: queued|running|done|error, position, plan, error }
+//    GET  /api/jobs/:id/video  — готовый MP4 (хранится JOB_TTL_MIN минут, по умолчанию 60)
+// ════════════════════════════════════════════════════════════════════════════
+const jobs = new Map();
+const JOB_TTL_MS = (+process.env.JOB_TTL_MIN || 60) * 60 * 1000;
+const MAX_QUEUE = 10;
+
+function dropJob(id) {
+  const job = jobs.get(id);
+  if (job) fs.rm(job.jobDir, { recursive: true, force: true }, () => {});
+  jobs.delete(id);
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    if ((job.status === "done" || job.status === "error") && now - job.finishedAt > JOB_TTL_MS) dropJob(id);
+  }
+}, 5 * 60 * 1000).unref();
+
+app.post("/api/jobs", upload.single("music"), (req, res) => {
+  const musicPath = req.file?.path;
+  try {
+    customScenes(req.body);
+    if (renderSlot.size >= MAX_QUEUE) {
+      if (musicPath) fs.rm(musicPath, { force: true }, () => {});
+      return res.status(429).json({ error: "Сервер занят, попробуй через пару минут" });
+    }
+  } catch (e) {
+    if (musicPath) fs.rm(musicPath, { force: true }, () => {});
+    return res.status(e.status || 500).json({ error: e.message });
+  }
+
+  const id = crypto.randomUUID();
+  const jobDir = path.join(TMP, "job_" + id);
+  fs.mkdirSync(jobDir, { recursive: true });
+  const job = { status: "queued", createdAt: Date.now(), jobDir };
+  jobs.set(id, job);
+
+  renderSlot
+    .run(async () => {
+      job.status = "running";
+      job.startedAt = Date.now();
+      const { outPath, plan } = await produceVideo(req.body, { jobDir, musicPath });
+      Object.assign(job, { status: "done", outPath, plan });
+    })
+    .catch((e) => {
+      console.error("job error:", e.message);
+      Object.assign(job, { status: "error", error: e.message });
+      fs.rm(jobDir, { recursive: true, force: true }, () => {});
+    })
+    .finally(() => {
+      job.finishedAt = Date.now();
+      if (musicPath) fs.rm(musicPath, { force: true }, () => {});
+    });
+
+  res.status(202).json({ id });
+});
+
+app.get("/api/jobs/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Задача не найдена (сервер мог перезапуститься)" });
+  const position = job.status === "queued"
+    ? [...jobs.values()].filter((j) => j.status === "queued" && j.createdAt <= job.createdAt).length
+    : 0;
+  const now = Date.now();
+  res.json({
+    status: job.status,
+    position,
+    seconds: Math.round(((job.finishedAt || now) - (job.startedAt || job.createdAt)) / 1000),
+    plan: job.plan,
+    error: job.error,
+  });
+});
+
+app.get("/api/jobs/:id/video", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job || job.status !== "done") return res.status(404).json({ error: "Ролик не готов или удалён" });
+  res.sendFile(job.outPath, { headers: { "Content-Type": "video/mp4" } });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
