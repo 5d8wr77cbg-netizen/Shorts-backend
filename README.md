@@ -184,3 +184,5 @@ curl -X POST http://localhost:4000/api/anim/render -H 'Content-Type: application
 - `ELEVENLABS_API_KEY` — если задан, длинные ролики озвучивает ElevenLabs (вместо OpenAI);
   `ELEVENLABS_VOICE_ID` — ID голоса (по умолчанию Brian, `nPczCjzI2devNBz1zQrb`),
   `ELEVENLABS_MODEL` (`eleven_multilingual_v2`), `ELEVENLABS_STABILITY` (`0.5`)
+- `SFX_VOLUME` (`0.5`) — громкость звуковых эффектов длинных роликов (свуши, удары, монеты,
+  дождь, гул кофейни…; все звуки синтезируются кодом, `lib/longform/sfx.js`); `SFX=0` — выключить
