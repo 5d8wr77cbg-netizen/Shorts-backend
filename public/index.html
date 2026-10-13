@@ -133,7 +133,7 @@
     </div>
   </form>
 
-  <div id="status" class="status" hidden><div class="spinner"></div><span id="statusText">Рисую ролик…</span></div>
+  <div id="status" class="status" hidden><div class="spinner"></div><span id="statusText">Отправляю…</span></div>
   <div id="error" class="error" role="alert" hidden></div>
 
   <section id="result" class="card" hidden>
@@ -249,9 +249,7 @@
     if (own.length && !scene) return fail("Для своих фраз выбери сцену.");
 
     const fd = new FormData();
-    let url = "api/minimal/render";
     if (own.length) {
-      url = "api/anim/render";
       const s = { template: scene, captions: own };
       if (lang === "ru" && LABELS_RU[scene]) s.labels = LABELS_RU[scene];
       fd.append("scenes", JSON.stringify([s]));
@@ -265,44 +263,87 @@
 
     $("go").disabled = true;
     show("result", false);
-    show("status", true);
-    const started = Date.now();
-    const tick = setInterval(() => {
-      const s = Math.round((Date.now() - started) / 1000);
-      $("statusText").textContent = `Рисую ролик… ${s} сек (обычно 15–40)`;
-    }, 1000);
-
     try {
-      const resp = await fetch(url, { method: "POST", body: fd, headers: code ? { "X-Access-Code": code } : {} });
+      const resp = await fetch("api/jobs", { method: "POST", body: fd, headers: code ? { "X-Access-Code": code } : {} });
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
         if (resp.status === 401) $("codeField").hidden = false;
-        throw new Error(err.error || `Ошибка сервера (${resp.status})`);
+        throw new Error(data.error || `Ошибка сервера (${resp.status})`);
       }
-      let plan = null;
-      try { plan = JSON.parse(decodeURIComponent(resp.headers.get("X-Short-Plan") || "")); } catch {}
-      const blob = await resp.blob();
-      if (videoUrl) URL.revokeObjectURL(videoUrl);
-      videoUrl = URL.createObjectURL(blob);
-      const name = `short-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.mp4`;
-      videoFile = new File([blob], name, { type: "video/mp4" });
-
-      $("video").src = videoUrl;
-      $("download").href = videoUrl;
-      $("download").download = name;
-      $("share").hidden = !(navigator.canShare && navigator.canShare({ files: [videoFile] }));
-      renderMeta(plan || (own.length ? { description: own.map((c) => c.text).join(" ") } : null));
-      show("result", true);
-      $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+      store.set("job", JSON.stringify({ id: data.id, own: own.map((c) => c.text).join(" ") }));
+      await follow(data.id, own);
     } catch (err) {
-      fail(err.message === "Failed to fetch" ? "Нет связи с сервером." : err.message);
+      fail(err.message === "Failed to fetch" || err.message === "Load failed" ? "Нет связи с сервером." : err.message);
+      $("go").disabled = false;
+    }
+  });
+
+  // Следит за задачей на сервере. Если телефон заблокировался или страницу
+  // закрыли, после возврата слежение продолжается с того же места.
+  let following = null;
+  async function follow(id, own) {
+    if (following === id) return;
+    following = id;
+    $("go").disabled = true;
+    show("error", false);
+    show("status", true);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    try {
+      for (;;) {
+        let st;
+        try {
+          const r = await fetch(`api/jobs/${id}`, { cache: "no-store" });
+          st = await r.json();
+          if (r.status === 404) throw new Error(st.error || "Задача не найдена");
+        } catch (e) {
+          if (e.message.includes("не найдена")) throw e;
+          $("statusText").textContent = "Нет связи с сервером, пробую снова…";
+          await sleep(4000);
+          continue;
+        }
+        if (st.status === "error") throw new Error(st.error || "Не удалось собрать ролик");
+        if (st.status === "done") {
+          const vr = await fetch(`api/jobs/${id}/video`);
+          if (!vr.ok) throw new Error("Ролик удалён с сервера, сделай заново");
+          showVideo(await vr.blob(), st.plan, own);
+          break;
+        }
+        $("statusText").textContent = st.status === "queued"
+          ? `В очереди: ${st.position}-й. Можно заблокировать телефон`
+          : `Рисую ролик… ${st.seconds} сек. Можно заблокировать телефон`;
+        await sleep(2500);
+      }
+    } catch (err) {
+      fail(err.message);
     } finally {
-      clearInterval(tick);
+      store.set("job", "");
+      following = null;
       show("status", false);
       $("statusText").textContent = "Рисую ролик…";
       $("go").disabled = false;
     }
-  });
+  }
+
+  function showVideo(blob, plan, own) {
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    videoUrl = URL.createObjectURL(blob);
+    const name = `short-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.mp4`;
+    videoFile = new File([blob], name, { type: "video/mp4" });
+    $("video").src = videoUrl;
+    $("download").href = videoUrl;
+    $("download").download = name;
+    $("share").hidden = !(navigator.canShare && navigator.canShare({ files: [videoFile] }));
+    const ownText = typeof own === "string" ? own : (own || []).map((c) => c.text).join(" ");
+    renderMeta(plan && plan.title ? plan : ownText ? { description: ownText } : null);
+    show("result", true);
+    $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // Незаконченная задача с прошлого раза (вкладку закрывали или перезагружали)
+  try {
+    const saved = JSON.parse(store.get("job") || "null");
+    if (saved && saved.id) follow(saved.id, saved.own);
+  } catch {}
 
   // На iPhone «Поделиться» → «Сохранить видео» кладёт ролик в Фото
   $("share").addEventListener("click", async () => {
