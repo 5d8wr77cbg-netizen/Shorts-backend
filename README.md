@@ -1,0 +1,86 @@
+# Shorts Studio — backend
+
+Генератор YouTube Shorts: подписи → анимация → MP4 (FFmpeg).
+
+## Без платных ключей
+
+Сервер работает вообще без ключей: анимированные ролики про деньги собираются бесплатно, а подписи
+берутся из встроенной библиотеки фраз (`lib/phrases.js`: 7 сцен × 8 историй, английский и русский).
+
+Чтобы подписи писал ИИ, достаточно бесплатного ключа (добавь в `.env`):
+
+| Ключ | Где взять | Стоимость |
+|---|---|---|
+| `GEMINI_API_KEY` | aistudio.google.com → Get API key | бесплатный тариф с дневным лимитом |
+| `GROQ_API_KEY` | console.groq.com → API Keys | бесплатный план с лимитом |
+| `OPENAI_API_KEY` | platform.openai.com | платно |
+
+Если ИИ не ответил (например, закончился бесплатный лимит), ролик всё равно соберётся из библиотеки.
+`OPENAI_API_KEY` нужен только для картинок (`engine=images`, `/api/generate-image`) и озвучки (`/api/tts`).
+`GET /health` показывает, какой ИИ сейчас используется.
+
+## Стиль `minimal` — анимированные ролики про деньги
+
+Формат по разбору канала Simply Animated: чёрный фон, белые 3D-человечки, одна идея = одна
+визуальная метафора, одна короткая фраза сверху (печатается по буквам, ключевое слово жирным),
+10–20 секунд, без цифр и инфографики.
+
+Анимация рисуется своим движком (`lib/anim`), без внешних сервисов и без генерации картинок:
+персонаж с суставами (`figure.js`), реквизит (`props.js`) и готовые сцены (`scenes.js`):
+
+| Сцена | Что происходит | Про что |
+|---|---|---|
+| `saver_vs_spender` | один складывает монеты в стопку, другой выбрасывает свои | копить vs тратить |
+| `compound_stairs` | столбики монет растут всё быстрее, герой поднимается наверх | сложный процент |
+| `crowd_follow` | толпа с пакетами идёт к обрыву, герой разворачивается | потребительство, толпа |
+| `debt_ball` | герой тащит гирю на цепи, гиря растёт | долги, кредиты |
+| `ladder_climb` | герой лезет по лестнице к свету | путь к богатству |
+| `door_light` | герой стучит, дверь открывается, свет | возможности, действие |
+| `paycheck_treadmill` | бег на дорожке, зарплата приходит и уезжает | крысиные бега |
+
+### Ролик за один запрос (сцену и подписи выбирает ИИ или библиотека фраз)
+
+```bash
+curl -X POST http://localhost:4000/api/minimal/render \
+  -F topic="Why saving feels slow but wins" -F language=en \
+  -F music=@music.mp3 -o short.mp4
+```
+
+Без `topic` тема выбирается сама. `-F engine=library` — всегда без ИИ, `-F template=debt_ball` —
+конкретная сцена. План ролика (заголовок, описание, хэштеги) приходит в
+заголовке ответа `X-Short-Plan` (JSON, URI-encoded). Режим со статичными картинками
+gpt-image-1 вместо анимации: `-F engine=images`.
+
+### Свой сценарий
+
+```bash
+curl -X POST http://localhost:4000/api/anim/render -H 'Content-Type: application/json' -d '{
+  "scenes": [{
+    "template": "saver_vs_spender",
+    "captions": [
+      { "text": "Same paycheck. Different habits.", "highlight": "habits" },
+      { "text": "The other wonders where it went.", "highlight": "went" }
+    ]
+  }]
+}' -o short.mp4
+```
+
+Список сцен: `GET /api/anim/templates`. Музыка — файлом `music` в multipart-запросе
+(тогда `scenes` передаётся строкой JSON).
+
+### По шагам
+
+1. `POST /api/minimal/ideas` `{ "language": "en", "count": 10 }` — идеи роликов.
+2. `POST /api/minimal/plan` `{ "topic": "...", "language": "en" }` — сцены и подписи.
+3. `POST /api/anim/render` `{ "scenes": plan.scenes }` — сборка (можно поправить подписи).
+
+## Переменные окружения
+
+Все необязательные.
+
+- `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY` — ключи ИИ (см. выше)
+- `LLM_PROVIDER` — `gemini` | `groq` | `openai`, если ключей несколько (по умолчанию первый найденный в этом порядке)
+- `GEMINI_MODEL` (по умолчанию `gemini-3.5-flash-lite`), `GROQ_MODEL` (`openai/gpt-oss-20b`), `OPENAI_MODEL` (`gpt-4o-mini`)
+- `FRONTEND_ORIGIN` — домен фронтенда для CORS
+- `CAPTION_FONT` — шрифт текста (по умолчанию `Inter`), `FONTS_DIR` — папка со своими шрифтами
+- `PORT` — порт (по умолчанию 4000)
