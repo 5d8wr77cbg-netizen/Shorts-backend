@@ -30,13 +30,14 @@ import multer from "multer";
 import ffmpegPath from "ffmpeg-static";
 import { buildVideo } from "./lib/video.js";
 import {
-  minimalImagePrompt, planSystemPrompt, ideasSystemPrompt, normalizePlan, animPlanSystemPrompt, normalizeAnimPlan,
+  minimalImagePrompt, planSystemPrompt, ideasSystemPrompt, normalizePlan, beatsPlanSystemPrompt, normalizeBeatsPlan,
 } from "./lib/minimal.js";
 import { TEMPLATES } from "./lib/anim/scenes.js";
-import { renderClip } from "./lib/anim/render.js";
+import { renderBeat, beatDuration, validateBeat, sceneToBeat, ALL_ACTIONS, LAYOUTS } from "./lib/anim/beats.js";
+import { STORIES, storyPlan, pickStory } from "./lib/stories.js";
 import { FORMATS } from "./lib/video.js";
 import { chat, chatJson, requireOpenAI, LLM_PROVIDER, LLM_MODEL } from "./lib/llm.js";
-import { libraryPlan, libraryIdeas } from "./lib/phrases.js";
+import { libraryPlan } from "./lib/phrases.js";
 import { createLimiter } from "./lib/queue.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -305,12 +306,32 @@ app.post(
 // ════════════════════════════════════════════════════════════════════════════
 //  Стиль "minimal": ролики про деньги в формате «3D-человечки на чёрном фоне»
 // ════════════════════════════════════════════════════════════════════════════
-//  engine: "anim"    — анимированные сцены; подписи пишет ИИ, а без ключа ИИ —
-//                      встроенная библиотека фраз (по умолчанию)
-//          "library" — всегда библиотека фраз, без ИИ
+//  engine: "anim"    — ролик ~32 с из 4 сцен в формате конкурента; сценарий пишет ИИ,
+//                      а без ключа ИИ — берётся из библиотеки сюжетов (по умолчанию)
+//          "library" — всегда библиотека сюжетов, без ИИ
 //          "images"  — картинки gpt-image-1 с наездом камеры (нужен OPENAI_API_KEY)
-async function makeMinimalPlan({ topic, language, scenes, engine, template }) {
-  let user = topic ? `Topic: ${topic}` : "Pick one strong money truth yourself (not the most obvious one).";
+//  story — id сюжета из библиотеки; template — старая одиночная сцена (короткий ролик)
+// Свои фразы: строка i → фраза сцены i; *слово* — выделение жирным
+function applyLines(plan, lines) {
+  const list = String(lines || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!list.length || !Array.isArray(plan.beats)) return plan;
+  plan.beats.forEach((b, i) => {
+    if (!list[i]) return;
+    const m = list[i].match(/\*([^*]+)\*/);
+    b.captions = [{ text: list[i].replace(/\*/g, ""), highlight: m ? m[1].trim().split(/\s+/)[0] : "" }];
+  });
+  plan.description = plan.beats.flatMap((b) => (b.captions || []).map((c) => c.text)).join(" ");
+  plan.title = plan.beats[plan.beats.length - 1]?.captions?.[0]?.text?.replace(/[.!]+$/, "") || plan.title;
+  return plan;
+}
+
+async function makeMinimalPlan(body) {
+  const plan = await makePlanInner(body);
+  return body.lines ? applyLines(plan, body.lines) : plan;
+}
+
+async function makePlanInner({ topic, language, scenes, engine, template, story }) {
+  const user = topic ? `Topic: ${topic}` : "Pick one strong money truth yourself (not the most obvious one).";
   if (engine === "images") {
     requireOpenAI("Режим с картинками (engine=images)");
     const count = Math.min(Math.max(+scenes || 3, 2), 6);
@@ -318,42 +339,34 @@ async function makeMinimalPlan({ topic, language, scenes, engine, template }) {
     if (!plan.scenes.length) throw new Error("ИИ не вернул сцены");
     return { engine: "images", ...plan };
   }
-  if (engine === "library" || !LLM_PROVIDER) return libraryPlan({ topic, language, template });
-  if (TEMPLATES[template]) user += `\nUse exactly one scene with the animation "${template}".`;
+  const chosen = STORIES.find((st) => st.id === story);
+  if (chosen) return storyPlan(chosen, language);
+  if (TEMPLATES[template]) return libraryPlan({ topic, language, template });
+  if (engine === "library" || !LLM_PROVIDER) return storyPlan(pickStory(topic), language);
   try {
-    const plan = normalizeAnimPlan(
-      await chatJson(animPlanSystemPrompt({ language: language || "en", templates: TEMPLATES }), user),
-      TEMPLATES
+    const plan = normalizeBeatsPlan(
+      await chatJson(beatsPlanSystemPrompt({ language: language || "en", actions: ALL_ACTIONS, layouts: LAYOUTS }), user, 3000),
+      { actions: ALL_ACTIONS, layouts: LAYOUTS }
     );
-    if (TEMPLATES[template]) plan.scenes = plan.scenes.filter((sc) => sc.template === template).slice(0, 1);
-    if (!plan.scenes.length) throw new Error("ИИ не вернул сцены");
+    if (plan.beats.length < 2) throw new Error("ИИ не вернул сцены");
     return { engine: "anim", source: LLM_PROVIDER, ...plan };
   } catch (e) {
     // ИИ недоступен или исчерпан бесплатный лимит — ролик всё равно делаем
-    console.warn(`ИИ (${LLM_PROVIDER}) не ответил, беру библиотеку фраз:`, e.message);
-    return libraryPlan({ topic, language, template });
+    console.warn(`ИИ (${LLM_PROVIDER}) не ответил, беру сюжет из библиотеки:`, e.message);
+    return storyPlan(pickStory(topic), language);
   }
 }
 
-// Рендерит анимированные сцены плана и собирает финальный ролик
-async function renderAnimScenes(planScenes, { jobDir, format, musicPath, musicVolume }) {
+// Рендерит биты (сцены) и собирает финальный ролик
+async function renderBeats(beats, { jobDir, format, musicPath, musicVolume }) {
   const [W, H] = FORMATS[format] || FORMATS["9:16"];
   const scenes = [];
-  for (let i = 0; i < planScenes.length; i++) {
-    const s = planScenes[i];
-    const tpl = TEMPLATES[s.template];
-    if (!tpl) throw new Error(`Неизвестная сцена: ${s.template}`);
-    const duration = Math.min(Math.max(+s.duration || tpl.duration, 4), 20);
+  for (let i = 0; i < beats.length; i++) {
+    const beat = sceneToBeat(beats[i]);
     const clipPath = path.join(jobDir, `clip_${i}.mp4`);
-    await renderClip({ template: s.template, duration, params: s.params || {}, W, H, outPath: clipPath });
-    scenes.push({
-      clipPath,
-      duration,
-      captions: s.captions,
-      caption: s.caption,
-      highlight: s.highlight,
-      labels: s.labels ?? tpl.labels,
-    });
+    const { duration } = await renderBeat({ beat, W, H, outPath: clipPath });
+    // подписи над героями рисуются в кадре, в ASS идут только фразы сверху
+    scenes.push({ clipPath, duration, prefaded: true, captions: beat.captions, caption: beat.caption, highlight: beat.highlight });
   }
   return buildVideo({ scenes, jobDir, format, style: "minimal", musicPath, musicVolume });
 }
@@ -368,7 +381,10 @@ app.post("/api/minimal/ideas", async (req, res) => {
   try {
     const { language, count } = req.body;
     const n = Math.min(Math.max(+count || 10, 1), 30);
-    if (!LLM_PROVIDER) return res.json({ ideas: libraryIdeas({ language, count: n }) });
+    if (!LLM_PROVIDER) {
+      const lang = language === "ru" ? "ru" : "en";
+      return res.json({ ideas: STORIES.slice(0, n).map((st) => ({ topic: st.title[lang], story: st.id })) });
+    }
     const data = await chatJson(ideasSystemPrompt({ language: language || "en", count: n }), "Give the ideas.", 2000);
     res.json({ ideas: Array.isArray(data.ideas) ? data.ideas : [] });
   } catch (e) {
@@ -398,13 +414,16 @@ class BadRequest extends Error {
 
 // Проверка своих сцен до постановки в очередь
 function customScenes(body) {
-  if (body.scenes === undefined || body.scenes === "") return null;
-  const scenes = parseJsonField(body.scenes, []);
-  if (!Array.isArray(scenes) || scenes.length === 0) throw new BadRequest("Нужен массив scenes: [{ template, captions }]");
-  if (scenes.length > 6) throw new BadRequest("Максимум 6 сцен");
-  const unknown = scenes.find((s) => !TEMPLATES[s?.template]);
-  if (unknown) throw new BadRequest(`Неизвестная сцена: ${unknown?.template}. Список: GET /api/anim/templates`);
-  return scenes;
+  const raw = body.beats !== undefined && body.beats !== "" ? body.beats : body.scenes;
+  if (raw === undefined || raw === "") return null;
+  const list = parseJsonField(raw, []);
+  if (!Array.isArray(list) || list.length === 0) throw new BadRequest("Нужен массив scenes или beats");
+  if (list.length > 6) throw new BadRequest("Максимум 6 сцен");
+  const beats = list.map((s) => sceneToBeat(s || {}));
+  for (const bt of beats) {
+    try { validateBeat(bt); } catch (e) { throw new BadRequest(`${e.message}. Список: GET /api/anim/templates`); }
+  }
+  return beats;
 }
 
 // Собирает ролик: свои сцены (body.scenes) или план от ИИ / библиотеки.
@@ -414,13 +433,13 @@ async function produceVideo(body, { jobDir, musicPath }) {
   const musicVolume = Math.min(Math.max(+body.musicVolume || 0.6, 0), 1);
   const own = customScenes(body);
   if (own) {
-    const outPath = await renderAnimScenes(own, { jobDir, format, musicPath, musicVolume });
-    return { outPath, plan: { engine: "anim", source: "custom", scenes: own } };
+    const outPath = await renderBeats(own, { jobDir, format, musicPath, musicVolume });
+    return { outPath, plan: { engine: "anim", source: "custom", beats: own } };
   }
 
   const plan = await makeMinimalPlan(body);
   if (plan.engine === "anim") {
-    return { outPath: await renderAnimScenes(plan.scenes, { jobDir, format, musicPath, musicVolume }), plan };
+    return { outPath: await renderBeats(plan.beats || plan.scenes, { jobDir, format, musicPath, musicVolume }), plan };
   }
   const images = await Promise.all(
     plan.scenes.map((s) => generateImage(s.imagePrompt, { style: "minimal" }))
@@ -464,11 +483,16 @@ app.post("/api/minimal/render", upload.single("music"), (req, res) => renderNow(
 // ════════════════════════════════════════════════════════════════════════════
 
 //  GET /api/anim/templates → { templates: [{ name, duration, labels, about }] }
+//  + actions (все действия для битов), layouts (раскладки), stories (готовые сюжеты)
 app.get("/api/anim/templates", (req, res) => {
+  const lang = req.query.lang === "ru" ? "ru" : "en";
   res.json({
     templates: Object.entries(TEMPLATES).map(([name, t]) => ({
       name, duration: t.duration, labels: t.labels || [], about: t.about,
     })),
+    actions: Object.entries(ALL_ACTIONS).map(([name, a]) => ({ name, duration: a.duration, params: a.params || "", about: a.about })),
+    layouts: Object.fromEntries(Object.entries(LAYOUTS).map(([k, v]) => [k, v.length])),
+    stories: STORIES.map((st) => ({ id: st.id, title: st.title[lang], seconds: Math.round(storyPlan(st, lang).beats.reduce((sum, b) => sum + beatDuration(b), 0)) })),
   });
 });
 
@@ -477,9 +501,10 @@ app.get("/api/anim/templates", (req, res) => {
 //                        format?, musicVolume? } + file "music" (опционально)
 //  returns: video/mp4
 app.post("/api/anim/render", upload.single("music"), (req, res) => {
-  if (req.body.scenes === undefined || req.body.scenes === "") {
+  const empty = (v) => v === undefined || v === "";
+  if (empty(req.body.scenes) && empty(req.body.beats)) {
     if (req.file) fs.rm(req.file.path, { force: true }, () => {});
-    return res.status(400).json({ error: "Нужен массив scenes: [{ template, captions }]" });
+    return res.status(400).json({ error: "Нужен массив scenes или beats" });
   }
   renderNow(req, res, "anim/render");
 });
