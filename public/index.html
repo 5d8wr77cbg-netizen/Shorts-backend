@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Shorts Studio</title>
+<style>
+  :root {
+    --bg: #000;
+    --card: #111;
+    --line: #262626;
+    --text: #f2f2f2;
+    --muted: #8a8a8a;
+    --accent: #fff;
+    --err: #ff6b6b;
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    padding: max(20px, env(safe-area-inset-top)) 16px max(32px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 520px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin: 8px 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 15px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+  .field + .field { margin-top: 16px; }
+  input[type=text], input[type=password], select, textarea {
+    width: 100%; font: inherit; font-size: 16px; color: var(--text);
+    background: #000; border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px; outline: none; -webkit-appearance: none; appearance: none;
+  }
+  select {
+    background-image: linear-gradient(45deg, transparent 50%, #888 50%), linear-gradient(135deg, #888 50%, transparent 50%);
+    background-position: calc(100% - 20px) 50%, calc(100% - 14px) 50%;
+    background-size: 6px 6px; background-repeat: no-repeat; padding-right: 36px;
+  }
+  textarea { min-height: 110px; resize: vertical; }
+  input:focus, select:focus, textarea:focus { border-color: #555; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: #000; border: 1px solid var(--line); border-radius: 12px; padding: 4px; }
+  .seg button { font: inherit; font-size: 15px; color: var(--muted); background: none; border: 0; border-radius: 9px; padding: 9px; }
+  .seg button[aria-pressed=true] { background: #222; color: var(--text); }
+  .file { display: flex; align-items: center; gap: 10px; }
+  .file label.btn { margin: 0; flex: none; }
+  .file span { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file input { display: none; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font: inherit; font-size: 15px; color: var(--text); background: #1c1c1c;
+    border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; text-decoration: none; cursor: pointer;
+  }
+  .btn.main {
+    width: 100%; font-size: 17px; font-weight: 600; padding: 16px; margin-top: 4px;
+    background: var(--accent); color: #000; border: 0;
+  }
+  .btn:disabled { opacity: 0.5; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 15px; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "+ "; }
+  details[open] summary::before { content: "− "; }
+  details[open] summary { margin-bottom: 12px; }
+  .hint { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+  .status { text-align: center; color: var(--muted); padding: 18px 0 6px; font-size: 15px; }
+  .spinner { width: 28px; height: 28px; margin: 0 auto 10px; border: 2px solid #333; border-top-color: #fff; border-radius: 50%; animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { color: var(--err); text-align: center; padding: 10px 0; font-size: 15px; }
+  video { display: block; width: 100%; max-height: 70vh; aspect-ratio: 9 / 16; object-fit: contain; background: #000; border-radius: 12px; }
+  .row { display: flex; gap: 8px; margin-top: 12px; }
+  .row .btn { flex: 1; }
+  .meta { margin-top: 14px; }
+  .meta .item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); }
+  .meta .item div { flex: 1; font-size: 15px; word-break: break-word; }
+  .meta .item small { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+  .meta .copy { flex: none; padding: 6px 10px; font-size: 13px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Shorts Studio</h1>
+  <p class="sub">Анимированные ролики про деньги</p>
+
+  <form id="form" class="card" autocomplete="off">
+    <div class="field" id="codeField" hidden>
+      <label for="code">Код доступа</label>
+      <input id="code" type="password" placeholder="Код с сервера">
+    </div>
+
+    <div class="field">
+      <label for="topic">Тема (можно оставить пустой)</label>
+      <input id="topic" type="text" placeholder="Например: почему кредитки опасны">
+    </div>
+
+    <div class="field">
+      <label>Язык подписей</label>
+      <div class="seg" role="group" id="lang">
+        <button type="button" data-v="ru" aria-pressed="true">Русский</button>
+        <button type="button" data-v="en" aria-pressed="false">English</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="scene">Сцена</label>
+      <select id="scene">
+        <option value="">Подобрать по теме</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Музыка (необязательно)</label>
+      <div class="file">
+        <label class="btn" for="music">Выбрать файл</label>
+        <input id="music" type="file" accept="audio/*,.mp3,.m4a,.wav,.aac">
+        <span id="musicName">без музыки</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <details id="own">
+        <summary>Свои фразы</summary>
+        <textarea id="lines" placeholder="Каждая строка — отдельная фраза.&#10;Слово в *звёздочках* будет жирным.&#10;&#10;Долг сначала кажется *лёгким*.&#10;Потом он *растёт*."></textarea>
+        <p class="hint">2–3 короткие фразы. Для своих фраз нужно выбрать сцену.</p>
+      </details>
+    </div>
+
+    <div class="field">
+      <button class="btn main" id="go" type="submit">Сделать ролик</button>
+    </div>
+  </form>
+
+  <div id="status" class="status" hidden><div class="spinner"></div><span id="statusText">Рисую ролик…</span></div>
+  <div id="error" class="error" role="alert" hidden></div>
+
+  <section id="result" class="card" hidden>
+    <video id="video" controls playsinline loop></video>
+    <div class="row">
+      <button class="btn" id="share" type="button" hidden>Сохранить / Поделиться</button>
+      <a class="btn" id="download" download="short.mp4">Скачать</a>
+    </div>
+    <div class="meta" id="meta"></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const NAMES = {
+    saver_vs_spender: "Копит vs тратит",
+    compound_stairs: "Сложный процент",
+    crowd_follow: "Толпа идёт к обрыву",
+    debt_ball: "Гиря долга",
+    ladder_climb: "Лестница к свету",
+    door_light: "Дверь возможностей",
+    paycheck_treadmill: "Беговая дорожка",
+  };
+  const LABELS_RU = { saver_vs_spender: ["Копит", "Тратит"] };
+
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+  };
+
+  let lang = store.get("lang") || "ru";
+  let videoUrl = null;
+  let videoFile = null;
+
+  const setLang = (v) => {
+    lang = v;
+    store.set("lang", v);
+    document.querySelectorAll("#lang button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+  };
+  setLang(lang);
+  $("lang").addEventListener("click", (e) => { if (e.target.dataset.v) setLang(e.target.dataset.v); });
+
+  $("music").addEventListener("change", () => {
+    const f = $("music").files[0];
+    $("musicName").textContent = f ? f.name : "без музыки";
+  });
+
+  $("code").value = store.get("code") || "";
+
+  // Сцены и настройки сервера
+  fetch("api/anim/templates").then((r) => r.json()).then(({ templates }) => {
+    for (const t of templates || []) {
+      const o = document.createElement("option");
+      o.value = t.name;
+      o.textContent = NAMES[t.name] || t.name;
+      $("scene").appendChild(o);
+    }
+  }).catch(() => {});
+  fetch("health").then((r) => r.json()).then((h) => { if (h.accessCode) $("codeField").hidden = false; }).catch(() => {});
+
+  // "Долг *растёт* тихо" → { text: "Долг растёт тихо", highlight: "растёт" }
+  const parseLines = (raw) => raw.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 4).map((l) => {
+    const m = l.match(/\*([^*]+)\*/);
+    return { text: l.replace(/\*/g, ""), highlight: m ? m[1].trim().split(/\s+/)[0] : "" };
+  });
+
+  const show = (el, on) => { $(el).hidden = !on; };
+  const fail = (msg) => { $("error").textContent = msg; show("error", true); };
+
+  const copyBtn = (text) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "btn copy"; b.textContent = "Копировать";
+    b.onclick = async () => {
+      try { await navigator.clipboard.writeText(text); b.textContent = "Готово"; }
+      catch { b.textContent = "Не вышло"; }
+      setTimeout(() => (b.textContent = "Копировать"), 1500);
+    };
+    return b;
+  };
+
+  const renderMeta = (plan) => {
+    const box = $("meta");
+    box.innerHTML = "";
+    if (!plan) return;
+    const items = [
+      ["Название", plan.title],
+      ["Описание", plan.description],
+      ["Хэштеги", (plan.hashtags || []).join(" ")],
+    ].filter(([, v]) => v);
+    for (const [k, v] of items) {
+      const row = document.createElement("div");
+      row.className = "item";
+      const d = document.createElement("div");
+      const s = document.createElement("small");
+      s.textContent = k;
+      d.appendChild(s);
+      d.appendChild(document.createTextNode(v));
+      row.appendChild(d);
+      row.appendChild(copyBtn(v));
+      box.appendChild(row);
+    }
+  };
+
+  $("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    show("error", false);
+
+    const code = $("code").value.trim();
+    store.set("code", code);
+    const scene = $("scene").value;
+    const own = $("own").open ? parseLines($("lines").value) : [];
+    if (own.length && !scene) return fail("Для своих фраз выбери сцену.");
+
+    const fd = new FormData();
+    let url = "api/minimal/render";
+    if (own.length) {
+      url = "api/anim/render";
+      const s = { template: scene, captions: own };
+      if (lang === "ru" && LABELS_RU[scene]) s.labels = LABELS_RU[scene];
+      fd.append("scenes", JSON.stringify([s]));
+    } else {
+      fd.append("language", lang);
+      if ($("topic").value.trim()) fd.append("topic", $("topic").value.trim());
+      if (scene) fd.append("template", scene);
+    }
+    const music = $("music").files[0];
+    if (music) fd.append("music", music);
+
+    $("go").disabled = true;
+    show("result", false);
+    show("status", true);
+    const started = Date.now();
+    const tick = setInterval(() => {
+      const s = Math.round((Date.now() - started) / 1000);
+      $("statusText").textContent = `Рисую ролик… ${s} сек (обычно 15–40)`;
+    }, 1000);
+
+    try {
+      const resp = await fetch(url, { method: "POST", body: fd, headers: code ? { "X-Access-Code": code } : {} });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        if (resp.status === 401) $("codeField").hidden = false;
+        throw new Error(err.error || `Ошибка сервера (${resp.status})`);
+      }
+      let plan = null;
+      try { plan = JSON.parse(decodeURIComponent(resp.headers.get("X-Short-Plan") || "")); } catch {}
+      const blob = await resp.blob();
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+      videoUrl = URL.createObjectURL(blob);
+      const name = `short-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.mp4`;
+      videoFile = new File([blob], name, { type: "video/mp4" });
+
+      $("video").src = videoUrl;
+      $("download").href = videoUrl;
+      $("download").download = name;
+      $("share").hidden = !(navigator.canShare && navigator.canShare({ files: [videoFile] }));
+      renderMeta(plan || (own.length ? { description: own.map((c) => c.text).join(" ") } : null));
+      show("result", true);
+      $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) {
+      fail(err.message === "Failed to fetch" ? "Нет связи с сервером." : err.message);
+    } finally {
+      clearInterval(tick);
+      show("status", false);
+      $("statusText").textContent = "Рисую ролик…";
+      $("go").disabled = false;
+    }
+  });
+
+  // На iPhone «Поделиться» → «Сохранить видео» кладёт ролик в Фото
+  $("share").addEventListener("click", async () => {
+    if (!videoFile) return;
+    try { await navigator.share({ files: [videoFile] }); } catch {}
+  });
+})();
+</script>
+</body>
+</html>
