@@ -3,6 +3,7 @@
 //  Безопасно хранит API-ключи в .env и проксирует запросы к ИИ.
 //  Работает и без ключей: анимированные ролики собираются из библиотеки фраз.
 //  Эндпоинты:
+//    GET  /                 — страница «Сделать ролик» (public/index.html), удобно с телефона
 //    GET  /health           — проверка живости
 //    POST /api/script       — генерация сценария (GPT)
 //    POST /api/scene-prompts — разбивка сценария на сцены + DALL-E промпты
@@ -49,6 +50,18 @@ const app = express();
 app.use(cors({ origin: process.env.FRONTEND_ORIGIN || "*" }));
 app.use(express.json({ limit: "25mb" }));
 
+// Страница «Сделать ролик»
+app.use(express.static(path.join(__dirname, "public")));
+
+// Код доступа: если задан ACCESS_CODE, все POST /api/* требуют заголовок X-Access-Code.
+// Нужен, когда сервер открыт в интернете, чтобы чужие не тратили его ресурсы и лимиты ИИ.
+const ACCESS_CODE = process.env.ACCESS_CODE || "";
+app.use("/api", (req, res, next) => {
+  if (!ACCESS_CODE || req.method !== "POST") return next();
+  if (req.get("X-Access-Code") === ACCESS_CODE) return next();
+  res.status(401).json({ error: "Неверный код доступа" });
+});
+
 // Временная папка для файлов рендера
 const TMP = path.join(os.tmpdir(), "shorts-studio");
 if (!fs.existsSync(TMP)) fs.mkdirSync(TMP, { recursive: true });
@@ -66,6 +79,7 @@ app.get("/health", (req, res) => {
     time: Date.now(),
     ai: LLM_PROVIDER ? `${LLM_PROVIDER}:${LLM_MODEL}` : "library",
     openaiMedia: Boolean(process.env.OPENAI_API_KEY),
+    accessCode: Boolean(ACCESS_CODE),
   });
 });
 
@@ -290,7 +304,7 @@ app.post(
 //          "library" — всегда библиотека фраз, без ИИ
 //          "images"  — картинки gpt-image-1 с наездом камеры (нужен OPENAI_API_KEY)
 async function makeMinimalPlan({ topic, language, scenes, engine, template }) {
-  const user = topic ? `Topic: ${topic}` : "Pick one strong money truth yourself (not the most obvious one).";
+  let user = topic ? `Topic: ${topic}` : "Pick one strong money truth yourself (not the most obvious one).";
   if (engine === "images") {
     requireOpenAI("Режим с картинками (engine=images)");
     const count = Math.min(Math.max(+scenes || 3, 2), 6);
@@ -299,11 +313,13 @@ async function makeMinimalPlan({ topic, language, scenes, engine, template }) {
     return { engine: "images", ...plan };
   }
   if (engine === "library" || !LLM_PROVIDER) return libraryPlan({ topic, language, template });
+  if (TEMPLATES[template]) user += `\nUse exactly one scene with the animation "${template}".`;
   try {
     const plan = normalizeAnimPlan(
       await chatJson(animPlanSystemPrompt({ language: language || "en", templates: TEMPLATES }), user),
       TEMPLATES
     );
+    if (TEMPLATES[template]) plan.scenes = plan.scenes.filter((sc) => sc.template === template).slice(0, 1);
     if (!plan.scenes.length) throw new Error("ИИ не вернул сцены");
     return { engine: "anim", source: LLM_PROVIDER, ...plan };
   } catch (e) {
@@ -493,7 +509,7 @@ app.post("/api/generate-text", async (req, res) => {
 // ── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n✅ Shorts Studio backend запущен`);
-  console.log(`   → http://localhost:${PORT}`);
+  console.log(`   → http://localhost:${PORT}  (страница «Сделать ролик»)`);
   console.log(`   → health: http://localhost:${PORT}/health`);
   console.log(`   → FFmpeg: ${ffmpegPath}`);
   console.log(`   → ИИ для текста: ${LLM_PROVIDER ? `${LLM_PROVIDER} (${LLM_MODEL})` : "нет ключа — подписи из встроенной библиотеки"}`);
