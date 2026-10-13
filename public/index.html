@@ -105,7 +105,7 @@
     </div>
 
     <div class="field">
-      <label for="scene">Сцена</label>
+      <label for="scene">Сюжет (ролик ~32 сек, 4 сцены)</label>
       <select id="scene">
         <option value="">Подобрать по теме</option>
       </select>
@@ -123,8 +123,8 @@
     <div class="field">
       <details id="own">
         <summary>Свои фразы</summary>
-        <textarea id="lines" placeholder="Каждая строка — отдельная фраза.&#10;Слово в *звёздочках* будет жирным.&#10;&#10;Долг сначала кажется *лёгким*.&#10;Потом он *растёт*."></textarea>
-        <p class="hint">2–3 короткие фразы. Для своих фраз нужно выбрать сцену.</p>
+        <textarea id="lines" placeholder="Каждая строка — отдельная фраза.&#10;Слово в *звёздочках* будет жирным.&#10;&#10;Долг сначала кажется *лёгким*.&#10;Потом он *растёт*.&#10;Платежи *перевешивают* доход.&#10;Разорви этот *круг*."></textarea>
+        <p class="hint">До 4 строк — по одной фразе на каждую сцену сюжета.</p>
       </details>
     </div>
 
@@ -148,16 +148,6 @@
 
 <script>
 (() => {
-  const NAMES = {
-    saver_vs_spender: "Копит vs тратит",
-    compound_stairs: "Сложный процент",
-    crowd_follow: "Толпа идёт к обрыву",
-    debt_ball: "Гиря долга",
-    ladder_climb: "Лестница к свету",
-    door_light: "Дверь возможностей",
-    paycheck_treadmill: "Беговая дорожка",
-  };
-  const LABELS_RU = { saver_vs_spender: ["Копит", "Тратит"] };
 
   const $ = (id) => document.getElementById(id);
   const store = {
@@ -175,7 +165,7 @@
     document.querySelectorAll("#lang button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
   };
   setLang(lang);
-  $("lang").addEventListener("click", (e) => { if (e.target.dataset.v) setLang(e.target.dataset.v); });
+  $("lang").addEventListener("click", (e) => { if (e.target.dataset.v) { setLang(e.target.dataset.v); loadStories(); } });
 
   $("music").addEventListener("change", () => {
     const f = $("music").files[0];
@@ -185,14 +175,18 @@
   $("code").value = store.get("code") || "";
 
   // Сцены и настройки сервера
-  fetch("api/anim/templates").then((r) => r.json()).then(({ templates }) => {
-    for (const t of templates || []) {
+  const loadStories = () => fetch(`api/anim/templates?lang=${lang}`).then((r) => r.json()).then(({ stories }) => {
+    const sel = $("scene"), keep = sel.value;
+    sel.length = 1;
+    for (const st of stories || []) {
       const o = document.createElement("option");
-      o.value = t.name;
-      o.textContent = NAMES[t.name] || t.name;
-      $("scene").appendChild(o);
+      o.value = st.id;
+      o.textContent = st.title;
+      sel.appendChild(o);
     }
+    sel.value = keep;
   }).catch(() => {});
+  loadStories();
   fetch("health").then((r) => r.json()).then((h) => { if (h.accessCode) $("codeField").hidden = false; }).catch(() => {});
 
   // "Долг *растёт* тихо" → { text: "Долг растёт тихо", highlight: "растёт" }
@@ -246,18 +240,12 @@
     store.set("code", code);
     const scene = $("scene").value;
     const own = $("own").open ? parseLines($("lines").value) : [];
-    if (own.length && !scene) return fail("Для своих фраз выбери сцену.");
 
     const fd = new FormData();
-    if (own.length) {
-      const s = { template: scene, captions: own };
-      if (lang === "ru" && LABELS_RU[scene]) s.labels = LABELS_RU[scene];
-      fd.append("scenes", JSON.stringify([s]));
-    } else {
-      fd.append("language", lang);
-      if ($("topic").value.trim()) fd.append("topic", $("topic").value.trim());
-      if (scene) fd.append("template", scene);
-    }
+    fd.append("language", lang);
+    if ($("topic").value.trim()) fd.append("topic", $("topic").value.trim());
+    if (scene) fd.append("story", scene);
+    if (own.length) fd.append("lines", $("lines").value.trim());
     const music = $("music").files[0];
     if (music) fd.append("music", music);
 
