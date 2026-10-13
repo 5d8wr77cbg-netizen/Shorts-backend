@@ -1,6 +1,7 @@
 // ============================================================================
 //  Shorts Studio — Backend (Node.js + Express)
-//  Безопасно хранит API-ключи в .env и проксирует запросы к OpenAI.
+//  Безопасно хранит API-ключи в .env и проксирует запросы к ИИ.
+//  Работает и без ключей: анимированные ролики собираются из библиотеки фраз.
 //  Эндпоинты:
 //    GET  /health           — проверка живости
 //    POST /api/script       — генерация сценария (GPT)
@@ -15,6 +16,7 @@
 //    POST /api/anim/render    — собрать ролик из анимированных сцен (без GPT)
 // ============================================================================
 
+import "dotenv/config"; // первым: ключи нужны модулям ниже при импорте
 import express from "express";
 import cors from "cors";
 import fs from "fs";
@@ -23,8 +25,6 @@ import os from "os";
 import { fileURLToPath } from "url";
 import multer from "multer";
 import ffmpegPath from "ffmpeg-static";
-import OpenAI from "openai";
-import dotenv from "dotenv";
 import { buildVideo } from "./lib/video.js";
 import {
   minimalImagePrompt, planSystemPrompt, ideasSystemPrompt, normalizePlan, animPlanSystemPrompt, normalizeAnimPlan,
@@ -32,23 +32,14 @@ import {
 import { TEMPLATES } from "./lib/anim/scenes.js";
 import { renderClip } from "./lib/anim/render.js";
 import { FORMATS } from "./lib/video.js";
-
-dotenv.config();
+import { chat, chatJson, requireOpenAI, LLM_PROVIDER, LLM_MODEL } from "./lib/llm.js";
+import { libraryPlan, libraryIdeas } from "./lib/phrases.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-if (!OPENAI_API_KEY) {
-  console.error("\n❌ OPENAI_API_KEY не найден в .env!");
-  console.error("   Создай файл .env и добавь строку: OPENAI_API_KEY=sk-...\n");
-  process.exit(1);
-}
-
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // ── App setup ───────────────────────────────────────────────────────────────
 const app = express();
@@ -69,7 +60,13 @@ const upload = multer({ dest: TMP, limits: { fileSize: 15 * 1024 * 1024 } });
 //  GET /health
 // ════════════════════════════════════════════════════════════════════════════
 app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "shorts-studio-backend", time: Date.now() });
+  res.json({
+    ok: true,
+    service: "shorts-studio-backend",
+    time: Date.now(),
+    ai: LLM_PROVIDER ? `${LLM_PROVIDER}:${LLM_MODEL}` : "library",
+    openaiMedia: Boolean(process.env.OPENAI_API_KEY),
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -94,19 +91,10 @@ app.post("/api/script", async (req, res) => {
 Ниша: ${niche || "—"} | Тон: ${tone || "—"} | Длительность: ${duration || "60 сек"}
 ${hook ? `Желаемый хук: "${hook}"` : ""}`;
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      max_tokens: 1200,
-    });
-
-    res.json({ script: completion.choices[0].message.content });
+    res.json({ script: await chat({ system, user, maxTokens: 1200, temperature: 0.8 }) });
   } catch (e) {
     console.error("script error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -125,25 +113,21 @@ app.post("/api/scene-prompts", async (req, res) => {
 [{"label":"ХУУК","text":"текст на экране до 80 символов","subtitle":"субтитр до 50 символов","duration":3,"imagePrompt":"detailed DALL-E prompt in English, cinematic vertical 9:16, no text on image"}]
 Правила: text — главная фраза, subtitle — короткая версия, duration — секунды 3-8.`;
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: `Сценарий:\n${script}\n\nВерни JSON-массив сцен.` },
-      ],
-      max_tokens: 1200,
-    });
-
-    let raw = completion.choices[0].message.content.trim();
+    let raw = (await chat({
+      system,
+      user: `Сценарий:\n${script}\n\nВерни JSON-массив сцен.`,
+      maxTokens: 1200,
+      temperature: 0.7,
+    })).trim();
     raw = raw.replace(/```json|```/g, "").trim();
 
-    // GPT иногда оборачивает массив в объект {scenes:[...]}
+    // ИИ иногда оборачивает массив в объект {scenes:[...]}
     let scenes;
     try {
       const parsed = JSON.parse(raw);
       scenes = Array.isArray(parsed) ? parsed : (parsed.scenes || parsed.items || []);
     } catch {
-      return res.status(500).json({ error: "Не удалось разобрать ответ GPT" });
+      return res.status(500).json({ error: "Не удалось разобрать ответ ИИ" });
     }
 
     scenes = scenes.map((s, i) => ({
@@ -158,7 +142,7 @@ app.post("/api/scene-prompts", async (req, res) => {
     res.json({ scenes });
   } catch (e) {
     console.error("scene-prompts error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -168,7 +152,7 @@ app.post("/api/scene-prompts", async (req, res) => {
 //  returns: image/png (binary)
 // ════════════════════════════════════════════════════════════════════════════
 async function generateImage(prompt, { size, style } = {}) {
-  const result = await openai.images.generate({
+  const result = await requireOpenAI("Генерация картинок").images.generate({
     model: "gpt-image-1",
     prompt: style === "minimal"
       ? minimalImagePrompt(prompt)
@@ -197,7 +181,7 @@ app.post("/api/generate-image", async (req, res) => {
     res.send(buffer);
   } catch (e) {
     console.error("generate-image error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -211,7 +195,7 @@ app.post("/api/tts", async (req, res) => {
     const { text, voice } = req.body;
     if (!text) return res.status(400).json({ error: "Нужен text" });
 
-    const mp3 = await openai.audio.speech.create({
+    const mp3 = await requireOpenAI("Озвучка").audio.speech.create({
       model: "tts-1",
       voice: voice || "nova", // nova хорошо звучит на русском
       input: text.slice(0, 4000),
@@ -222,7 +206,7 @@ app.post("/api/tts", async (req, res) => {
     res.send(buffer);
   } catch (e) {
     console.error("tts error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -293,7 +277,7 @@ app.post(
     } catch (e) {
       console.error("build-video error:", e.message);
       fs.rm(jobDir, { recursive: true, force: true }, () => {});
-      res.status(500).json({ error: e.message });
+      res.status(e.status || 500).json({ error: e.message });
     }
   }
 );
@@ -301,36 +285,32 @@ app.post(
 // ════════════════════════════════════════════════════════════════════════════
 //  Стиль "minimal": ролики про деньги в формате «3D-человечки на чёрном фоне»
 // ════════════════════════════════════════════════════════════════════════════
-async function chatJson(system, user, maxTokens = 1500) {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    max_tokens: maxTokens,
-    temperature: 0.9,
-  });
-  return JSON.parse(completion.choices[0].message.content);
-}
-
-//  engine: "anim" — готовые анимированные сцены (по умолчанию, без генерации картинок)
-//          "images" — картинки gpt-image-1 с медленным наездом камеры
-async function makeMinimalPlan({ topic, language, scenes, engine }) {
+//  engine: "anim"    — анимированные сцены; подписи пишет ИИ, а без ключа ИИ —
+//                      встроенная библиотека фраз (по умолчанию)
+//          "library" — всегда библиотека фраз, без ИИ
+//          "images"  — картинки gpt-image-1 с наездом камеры (нужен OPENAI_API_KEY)
+async function makeMinimalPlan({ topic, language, scenes, engine, template }) {
   const user = topic ? `Topic: ${topic}` : "Pick one strong money truth yourself (not the most obvious one).";
-  if (engine !== "images") {
+  if (engine === "images") {
+    requireOpenAI("Режим с картинками (engine=images)");
+    const count = Math.min(Math.max(+scenes || 3, 2), 6);
+    const plan = normalizePlan(await chatJson(planSystemPrompt({ language: language || "en", scenes: count }), user), count);
+    if (!plan.scenes.length) throw new Error("ИИ не вернул сцены");
+    return { engine: "images", ...plan };
+  }
+  if (engine === "library" || !LLM_PROVIDER) return libraryPlan({ topic, language, template });
+  try {
     const plan = normalizeAnimPlan(
       await chatJson(animPlanSystemPrompt({ language: language || "en", templates: TEMPLATES }), user),
       TEMPLATES
     );
-    if (!plan.scenes.length) throw new Error("GPT не вернул сцены");
-    return { engine: "anim", ...plan };
+    if (!plan.scenes.length) throw new Error("ИИ не вернул сцены");
+    return { engine: "anim", source: LLM_PROVIDER, ...plan };
+  } catch (e) {
+    // ИИ недоступен или исчерпан бесплатный лимит — ролик всё равно делаем
+    console.warn(`ИИ (${LLM_PROVIDER}) не ответил, беру библиотеку фраз:`, e.message);
+    return libraryPlan({ topic, language, template });
   }
-  const count = Math.min(Math.max(+scenes || 3, 2), 6);
-  const plan = normalizePlan(await chatJson(planSystemPrompt({ language: language || "en", scenes: count }), user), count);
-  if (!plan.scenes.length) throw new Error("GPT не вернул сцены");
-  return { engine: "images", ...plan };
 }
 
 // Рендерит анимированные сцены плана и собирает финальный ролик
@@ -361,20 +341,21 @@ function parseJsonField(v, fallback) {
   try { return JSON.parse(v); } catch { return fallback; }
 }
 
-//  POST /api/minimal/ideas  body: { language?, count? }  → { ideas: [{topic, metaphor}] }
+//  POST /api/minimal/ideas  body: { language?, count? }  → { ideas: [{topic, metaphor | template}] }
 app.post("/api/minimal/ideas", async (req, res) => {
   try {
     const { language, count } = req.body;
     const n = Math.min(Math.max(+count || 10, 1), 30);
+    if (!LLM_PROVIDER) return res.json({ ideas: libraryIdeas({ language, count: n }) });
     const data = await chatJson(ideasSystemPrompt({ language: language || "en", count: n }), "Give the ideas.", 2000);
     res.json({ ideas: Array.isArray(data.ideas) ? data.ideas : [] });
   } catch (e) {
     console.error("minimal/ideas error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
-//  POST /api/minimal/plan  body: { topic?, language?, engine?, scenes? }
+//  POST /api/minimal/plan  body: { topic?, language?, engine?, template?, scenes? }
 //  engine "anim":   → { scenes: [{template, duration, labels, captions:[{text, highlight}]}] }
 //                     собрать: POST /api/anim/render { scenes }
 //  engine "images": → { scenes: [{caption, highlight, labels, imagePrompt, duration}] }
@@ -385,12 +366,12 @@ app.post("/api/minimal/plan", async (req, res) => {
     res.json(await makeMinimalPlan(req.body));
   } catch (e) {
     console.error("minimal/plan error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
 //  POST /api/minimal/render  — весь ролик за один запрос
-//  multipart/form-data или JSON: { topic?, language?, engine?, scenes?, format?, musicVolume? }
+//  multipart/form-data или JSON: { topic?, language?, engine?, template?, scenes?, format?, musicVolume? }
 //  + file "music" (опционально)
 //  returns: video/mp4, план ролика — в заголовке X-Short-Plan (JSON, URI-encoded)
 app.post("/api/minimal/render", upload.single("music"), async (req, res) => {
@@ -427,7 +408,7 @@ app.post("/api/minimal/render", upload.single("music"), async (req, res) => {
     console.error("minimal/render error:", e.message);
     fs.rm(jobDir, { recursive: true, force: true }, () => {});
     if (req.file) fs.rm(req.file.path, { force: true }, () => {});
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -484,7 +465,7 @@ app.post("/api/anim/render", upload.single("music"), async (req, res) => {
   } catch (e) {
     console.error("anim/render error:", e.message);
     cleanup();
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -496,18 +477,16 @@ app.post("/api/generate-text", async (req, res) => {
   try {
     const { system, user, maxTokens } = req.body;
     if (!user) return res.status(400).json({ error: "Нужен user-текст" });
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system || "Ты — полезный ассистент. Отвечай на русском." },
-        { role: "user", content: user },
-      ],
-      max_tokens: maxTokens || 1000,
+    const text = await chat({
+      system: system || "Ты — полезный ассистент. Отвечай на русском.",
+      user,
+      maxTokens: maxTokens || 1000,
+      temperature: 0.8,
     });
-    res.json({ text: completion.choices[0].message.content });
+    res.json({ text });
   } catch (e) {
     console.error("generate-text error:", e.message);
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -516,5 +495,7 @@ app.listen(PORT, () => {
   console.log(`\n✅ Shorts Studio backend запущен`);
   console.log(`   → http://localhost:${PORT}`);
   console.log(`   → health: http://localhost:${PORT}/health`);
-  console.log(`   → FFmpeg: ${ffmpegPath}\n`);
+  console.log(`   → FFmpeg: ${ffmpegPath}`);
+  console.log(`   → ИИ для текста: ${LLM_PROVIDER ? `${LLM_PROVIDER} (${LLM_MODEL})` : "нет ключа — подписи из встроенной библиотеки"}`);
+  console.log(`   → Картинки и озвучка OpenAI: ${process.env.OPENAI_API_KEY ? "включены" : "выключены (нет OPENAI_API_KEY)"}\n`);
 });
