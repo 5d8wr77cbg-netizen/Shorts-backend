@@ -195,3 +195,25 @@ curl -X POST http://localhost:4000/api/anim/render -H 'Content-Type: application
   `SFX_VOLUME` (`0.5`), `SFX=0` — выключить.
 - Музыка и звуки скачиваются сервером при первой сборке в кэш `ASSET_DIR`; без сети движок
   использует синтезированные звуки (`ASSETS=0` — всегда синтез)
+
+## Бумажный трейдер в Telegram
+
+Бот торгует **виртуальными** 1000 € (настоящих денег нет) по настоящим ценам Kraken — BTC, ETH, SOL, XRP —
+и отчитывается в Telegram: каждая сделка с объяснением, итог дня с графиком «бот против просто держать BTC».
+
+- Раз в час (`TRADER_INTERVAL_MIN`, по умолчанию 60) решает **ИИ** (если есть ключ OpenAI/Gemini) или
+  **правила** (тренд EMA50/100 + RSI). Всегда действуют стоп-лосс −8%, трейлинг-стоп −6% от пика,
+  не больше 35% капитала в монете; комиссия Kraken ~0,3% учитывается в каждой сделке.
+- Команды: `/status`, `/trades`, `/chart`, `/now`, `/backtest` (правила на последних 30 днях),
+  `/mode ai|rules`, `/pause`, `/resume`, `/reset [сумма]`; любой другой текст — вопрос боту.
+
+Как включить:
+1. В Telegram открой **@BotFather** → `/newbot` → получи токен.
+2. Render → Environment: `TELEGRAM_BOT_TOKEN=<токен>` (webhook ставится сам по `RENDER_EXTERNAL_URL`).
+3. Напиши боту `/start <ACCESS_CODE>`; он пришлёт chat id — добавь его как `TELEGRAM_CHAT_ID`, чтобы
+   после перезапуска сервера портфель восстановился из закреплённого файла в чате.
+4. Бесплатный Render засыпает через 15 минут без запросов — заведи на cron-job.org задачу раз в 10 минут:
+   `GET https://<сервер>/api/trader/tick?key=<ACCESS_CODE>`.
+
+Переменные: `TRADER_START_EUR` (1000), `TRADER_TZ` (`Europe/Berlin`), `TRADER_DAILY_HOUR` (21), `TRADER_DATA` (`./data`).
+

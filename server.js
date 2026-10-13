@@ -41,6 +41,7 @@ import { chat, chatJson, requireOpenAI, LLM_PROVIDER, LLM_MODEL } from "./lib/ll
 import { libraryPlan } from "./lib/phrases.js";
 import { createLimiter } from "./lib/queue.js";
 import { LONG_STORIES } from "./lib/longform/library.js";
+import { mountTrader } from "./lib/trader/index.js";
 import { writeLongScript, withChapterCards } from "./lib/longform/script.js";
 import { buildLongVideo } from "./lib/longform/build.js";
 
@@ -657,6 +658,9 @@ app.post("/api/generate-text", async (req, res) => {
   }
 });
 
+// ── Бумажный трейдер в Telegram (если задан TELEGRAM_BOT_TOKEN) ─────────────
+const traderOn = mountTrader(app);
+
 // ── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n✅ Shorts Studio backend запущен`);
@@ -664,5 +668,6 @@ app.listen(PORT, () => {
   console.log(`   → health: http://localhost:${PORT}/health`);
   console.log(`   → FFmpeg: ${ffmpegPath}`);
   console.log(`   → ИИ для текста: ${LLM_PROVIDER ? `${LLM_PROVIDER} (${LLM_MODEL})` : "нет ключа — подписи из встроенной библиотеки"}`);
-  console.log(`   → Картинки и озвучка OpenAI: ${process.env.OPENAI_API_KEY ? "включены" : "выключены (нет OPENAI_API_KEY)"}\n`);
+  console.log(`   → Картинки и озвучка OpenAI: ${process.env.OPENAI_API_KEY ? "включены" : "выключены (нет OPENAI_API_KEY)"}`);
+  console.log(`   → Бумажный трейдер в Telegram: ${traderOn ? "включён" : "выключен (нет TELEGRAM_BOT_TOKEN)"}\n`);
 });
