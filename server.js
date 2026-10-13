@@ -628,7 +628,11 @@ app.get("/api/jobs/:id", (req, res) => {
 app.get("/api/jobs/:id/thumb", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job || !job.thumbPath) return res.status(404).json({ error: "Обложки нет" });
-  res.sendFile(job.thumbPath, { headers: { "Content-Type": "image/jpeg" } });
+  // ?n=2 / ?n=3 — дополнительные варианты обложки для A/B-теста
+  const n = Math.min(Math.max(parseInt(req.query.n, 10) || 1, 1), 3);
+  const file = n === 1 ? job.thumbPath : path.join(path.dirname(job.thumbPath), `thumb_${n}.jpg`);
+  if (!fs.existsSync(file)) return res.status(404).json({ error: "Такого варианта обложки нет" });
+  res.sendFile(file, { headers: { "Content-Type": "image/jpeg" } });
 });
 
 app.get("/api/jobs/:id/video", (req, res) => {

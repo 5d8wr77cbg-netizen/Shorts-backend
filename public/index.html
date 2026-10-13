@@ -153,6 +153,8 @@
     </div>
     <div class="row" id="thumbRow" hidden>
       <a class="btn" id="thumbLink" download="thumbnail.jpg" target="_blank">Обложка</a>
+      <a class="btn" id="thumbLink2" download="thumbnail_2.jpg" target="_blank" hidden>Обложка 2</a>
+      <a class="btn" id="thumbLink3" download="thumbnail_3.jpg" target="_blank" hidden>Обложка 3</a>
     </div>
     <img id="thumb" alt="" hidden style="width:100%;border-radius:12px;margin-top:12px">
     <div class="meta" id="meta"></div>
@@ -354,6 +356,12 @@
     $("thumb").src = `api/jobs/${id}/thumb`;
     $("thumb").hidden = false;
     $("thumbLink").href = `api/jobs/${id}/thumb`;
+    // варианты обложки для A/B-теста в YouTube Studio
+    [2, 3].forEach((n) => {
+      const a = $("thumbLink" + n);
+      a.hidden = !(plan.thumbs && plan.thumbs.length >= n);
+      a.href = `api/jobs/${id}/thumb?n=${n}`;
+    });
     $("thumbRow").hidden = false;
     renderMeta({ title: plan.title, description: plan.description, hashtags: plan.tags && plan.tags.length ? [plan.tags.join(", ")] : [] });
     const m = $("meta").querySelectorAll("small");
