@@ -180,4 +180,7 @@ curl -X POST http://localhost:4000/api/anim/render -H 'Content-Type: application
 - `RENDER_CONCURRENCY` — сколько роликов собирать одновременно (по умолчанию 1; на 512 МБ больше нельзя)
 - `JOB_TTL_MIN` — сколько минут хранить готовый ролик на сервере (по умолчанию 60)
 - `FFMPEG_THREADS` — потоки кодировщика (по умолчанию 2)
-- `TTS_MODEL` (`gpt-4o-mini-tts`), `TTS_VOICE` (`onyx`), `TTS_INSTRUCTIONS` — озвучка длинных роликов
+- `TTS_MODEL` (`gpt-4o-mini-tts`), `TTS_VOICE` (`onyx`), `TTS_INSTRUCTIONS` — озвучка длинных роликов через OpenAI
+- `ELEVENLABS_API_KEY` — если задан, длинные ролики озвучивает ElevenLabs (вместо OpenAI);
+  `ELEVENLABS_VOICE_ID` — ID голоса (по умолчанию Brian, `nPczCjzI2devNBz1zQrb`),
+  `ELEVENLABS_MODEL` (`eleven_multilingual_v2`), `ELEVENLABS_STABILITY` (`0.5`)

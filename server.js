@@ -564,7 +564,7 @@ app.post("/api/jobs", upload.single("music"), (req, res) => {
   const musicPath = req.file?.path;
   const long = req.body.mode === "long";
   try {
-    if (long && process.env.TTS_FAKE !== "1") requireOpenAI("Озвучка длинных роликов");
+    if (long && process.env.TTS_FAKE !== "1" && !process.env.ELEVENLABS_API_KEY) requireOpenAI("Озвучка длинных роликов");
     else customScenes(req.body);
     if (renderSlot.size >= MAX_QUEUE) {
       if (musicPath) fs.rm(musicPath, { force: true }, () => {});
