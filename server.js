@@ -16,6 +16,7 @@
 //    GET  /api/anim/templates — список анимированных сцен
 //    POST /api/anim/render    — собрать ролик из анимированных сцен (без GPT)
 //    POST /api/jobs           — то же в фоне: { id } → GET /api/jobs/:id, /api/jobs/:id/video
+//                               mode=long — длинный ролик 9+ мин 16:9 с озвучкой (+ /thumb)
 // ============================================================================
 
 import "dotenv/config"; // первым: ключи нужны модулям ниже при импорте
@@ -39,6 +40,9 @@ import { FORMATS } from "./lib/video.js";
 import { chat, chatJson, requireOpenAI, LLM_PROVIDER, LLM_MODEL } from "./lib/llm.js";
 import { libraryPlan } from "./lib/phrases.js";
 import { createLimiter } from "./lib/queue.js";
+import { LONG_STORIES } from "./lib/longform/library.js";
+import { writeLongScript, withChapterCards } from "./lib/longform/script.js";
+import { buildLongVideo } from "./lib/longform/build.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -452,6 +456,28 @@ async function produceVideo(body, { jobDir, musicPath }) {
   return { outPath: await buildVideo({ scenes, jobDir, format, style: "minimal", musicPath, musicVolume }), plan };
 }
 
+// Длинный ролик «What if…» (формат Ifverse Tales в стиле канала): сценарий от ИИ
+// (или готовый из библиотеки) → озвучка OpenAI → рендер 16:9 → обложка и главы
+async function produceLong(body, { jobDir, musicPath, onProgress }) {
+  const language = body.language === "ru" ? "ru" : "en";
+  let script;
+  const chosen = LONG_STORIES.find((st) => st.id === body.story);
+  if (chosen) script = chosen;
+  else if (LLM_PROVIDER && body.engine !== "library") {
+    script = await writeLongScript({
+      topic: body.topic, language, minutes: Math.min(Math.max(+body.minutes || 9, 6), 15),
+      actions: ALL_ACTIONS, layouts: LAYOUTS, onProgress,
+    });
+  } else script = LONG_STORIES[0];
+  script = withChapterCards(script, language);
+  const result = await buildLongVideo({
+    script, jobDir, format: "16:9", musicPath,
+    musicVolume: Math.min(Math.max(+body.musicVolume || 0.12, 0), 1), onProgress,
+    minSeconds: Math.min(Math.max(+body.minutes || 9, 6), 15) * 60,
+  });
+  return { outPath: result.outPath, thumbPath: result.thumbPath, plan: { mode: "long", ...result.meta } };
+}
+
 // Синхронный вариант: ответ — сразу MP4 (удобно для curl)
 async function renderNow(req, res, label) {
   const jobDir = path.join(TMP, "job_" + crypto.randomUUID());
@@ -536,8 +562,10 @@ setInterval(() => {
 
 app.post("/api/jobs", upload.single("music"), (req, res) => {
   const musicPath = req.file?.path;
+  const long = req.body.mode === "long";
   try {
-    customScenes(req.body);
+    if (long && process.env.TTS_FAKE !== "1") requireOpenAI("Озвучка длинных роликов");
+    else customScenes(req.body);
     if (renderSlot.size >= MAX_QUEUE) {
       if (musicPath) fs.rm(musicPath, { force: true }, () => {});
       return res.status(429).json({ error: "Сервер занят, попробуй через пару минут" });
@@ -557,8 +585,13 @@ app.post("/api/jobs", upload.single("music"), (req, res) => {
     .run(async () => {
       job.status = "running";
       job.startedAt = Date.now();
-      const { outPath, plan } = await produceVideo(req.body, { jobDir, musicPath });
-      Object.assign(job, { status: "done", outPath, plan });
+      if (long) {
+        const r = await produceLong(req.body, { jobDir, musicPath, onProgress: (m) => { job.stage = m; } });
+        Object.assign(job, { status: "done", outPath: r.outPath, thumbPath: r.thumbPath, plan: r.plan });
+      } else {
+        const { outPath, plan } = await produceVideo(req.body, { jobDir, musicPath });
+        Object.assign(job, { status: "done", outPath, plan });
+      }
     })
     .catch((e) => {
       console.error("job error:", e.message);
@@ -584,9 +617,17 @@ app.get("/api/jobs/:id", (req, res) => {
     status: job.status,
     position,
     seconds: Math.round(((job.finishedAt || now) - (job.startedAt || job.createdAt)) / 1000),
+    stage: job.stage,
     plan: job.plan,
     error: job.error,
+    thumb: Boolean(job.thumbPath),
   });
+});
+
+app.get("/api/jobs/:id/thumb", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job || !job.thumbPath) return res.status(404).json({ error: "Обложки нет" });
+  res.sendFile(job.thumbPath, { headers: { "Content-Type": "image/jpeg" } });
 });
 
 app.get("/api/jobs/:id/video", (req, res) => {

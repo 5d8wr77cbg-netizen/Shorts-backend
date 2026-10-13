@@ -31,6 +31,24 @@
 Ролик собирается в фоне: телефон можно заблокировать, страница продолжит с того же места.
 После каждого Merge в `main` Render обновляет сервер сам.
 
+## Длинные ролики «What if…» (9+ минут, 16:9, с диктором)
+
+Формат канала Ifverse Tales в стиле канала (разбор — в [docs/competitor-analysis.md](docs/competitor-analysis.md)).
+На странице: **Формат → «Видео · 9+ мин»**, тема (например, «what if you invested $10 a day from 18?»),
+язык, музыка → «Сделать длинное видео». Результат: MP4 1920×1080 с озвучкой, обложка 1280×720,
+название, описание с таймкодами глав и теги.
+
+- Сценарий: ИИ пишет план глав, потом каждую главу (`lib/longform/script.js`); без ИИ —
+  готовый эталон «What If You Invested $10 a Day Starting at 18?» (`lib/longform/library.js`).
+- Озвучка: OpenAI `gpt-4o-mini-tts`, голос `onyx` (≈ $0,15 за 9-минутный ролик) — нужен
+  `OPENAI_API_KEY` с положительным балансом. Голос и манера: `TTS_VOICE`, `TTS_MODEL`, `TTS_INSTRUCTIONS`.
+- Сборка тяжёлая: ~600 секунд процессорного времени на 9 минут видео. На Render Free это
+  около часа, и бесплатный сервер засыпает без запросов — для длинных роликов нужен
+  платный тариф (Starter ≈ 20 мин, Standard ≈ 10 мин) или `VIDEO_SIZE=720`.
+
+API: `POST /api/jobs` с `mode=long` (+ `topic`, `language`, `minutes` 6–15, `music`, `story=ten_dollars_a_day`) →
+`GET /api/jobs/:id` (поле `stage` — этап), `GET /api/jobs/:id/video`, `GET /api/jobs/:id/thumb`.
+
 ## Без платных ключей
 
 Сервер работает вообще без ключей: анимированные ролики про деньги собираются бесплатно, а подписи
@@ -162,3 +180,4 @@ curl -X POST http://localhost:4000/api/anim/render -H 'Content-Type: application
 - `RENDER_CONCURRENCY` — сколько роликов собирать одновременно (по умолчанию 1; на 512 МБ больше нельзя)
 - `JOB_TTL_MIN` — сколько минут хранить готовый ролик на сервере (по умолчанию 60)
 - `FFMPEG_THREADS` — потоки кодировщика (по умолчанию 2)
+- `TTS_MODEL` (`gpt-4o-mini-tts`), `TTS_VOICE` (`onyx`), `TTS_INSTRUCTIONS` — озвучка длинных роликов

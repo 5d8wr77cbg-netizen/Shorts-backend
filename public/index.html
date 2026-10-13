@@ -92,6 +92,15 @@
     </div>
 
     <div class="field">
+      <label>Формат</label>
+      <div class="seg" role="group" id="mode">
+        <button type="button" data-v="short" aria-pressed="true">Shorts · 30 сек</button>
+        <button type="button" data-v="long" aria-pressed="false">Видео · 9+ мин</button>
+      </div>
+      <p class="hint" id="longHint" hidden>Горизонтальный ролик «What if…» с озвучкой диктора, главами и обложкой. Озвучка — через OpenAI (≈ $0,15 за ролик). Сборка долгая: от 15 минут до часа, телефон можно заблокировать.</p>
+    </div>
+
+    <div class="field">
       <label for="topic">Тема (можно оставить пустой)</label>
       <input id="topic" type="text" placeholder="Например: почему кредитки опасны">
     </div>
@@ -104,7 +113,7 @@
       </div>
     </div>
 
-    <div class="field">
+    <div class="field" id="sceneField">
       <label for="scene">Сюжет (ролик ~32 сек, 4 сцены)</label>
       <select id="scene">
         <option value="">Подобрать по теме</option>
@@ -120,7 +129,7 @@
       </div>
     </div>
 
-    <div class="field">
+    <div class="field" id="ownField">
       <details id="own">
         <summary>Свои фразы</summary>
         <textarea id="lines" placeholder="Каждая строка — отдельная фраза.&#10;Слово в *звёздочках* будет жирным.&#10;&#10;Долг сначала кажется *лёгким*.&#10;Потом он *растёт*.&#10;Платежи *перевешивают* доход.&#10;Разорви этот *круг*."></textarea>
@@ -142,6 +151,10 @@
       <button class="btn" id="share" type="button" hidden>Сохранить / Поделиться</button>
       <a class="btn" id="download" download="short.mp4">Скачать</a>
     </div>
+    <div class="row" id="thumbRow" hidden>
+      <a class="btn" id="thumbLink" download="thumbnail.jpg" target="_blank">Обложка</a>
+    </div>
+    <img id="thumb" alt="" hidden style="width:100%;border-radius:12px;margin-top:12px">
     <div class="meta" id="meta"></div>
   </section>
 </main>
@@ -156,6 +169,17 @@
   };
 
   let lang = store.get("lang") || "ru";
+  let mode = store.get("mode") || "short";
+  const setMode = (v) => {
+    mode = v;
+    store.set("mode", v);
+    document.querySelectorAll("#mode button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    $("longHint").hidden = v !== "long";
+    $("sceneField").hidden = v === "long";
+    $("ownField").hidden = v === "long";
+    $("topic").placeholder = v === "long" ? "Например: what if you invested $10 a day from 18?" : "Например: почему кредитки опасны";
+    $("go").textContent = v === "long" ? "Сделать длинное видео" : "Сделать ролик";
+  };
   let videoUrl = null;
   let videoFile = null;
 
@@ -165,6 +189,8 @@
     document.querySelectorAll("#lang button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
   };
   setLang(lang);
+  setMode(mode);
+  $("mode").addEventListener("click", (e) => { if (e.target.dataset.v) setMode(e.target.dataset.v); });
   $("lang").addEventListener("click", (e) => { if (e.target.dataset.v) { setLang(e.target.dataset.v); loadStories(); } });
 
   $("music").addEventListener("change", () => {
@@ -239,12 +265,13 @@
     const code = $("code").value.trim();
     store.set("code", code);
     const scene = $("scene").value;
-    const own = $("own").open ? parseLines($("lines").value) : [];
+    const own = mode !== "long" && $("own").open ? parseLines($("lines").value) : [];
 
     const fd = new FormData();
     fd.append("language", lang);
+    if (mode === "long") fd.append("mode", "long");
     if ($("topic").value.trim()) fd.append("topic", $("topic").value.trim());
-    if (scene) fd.append("story", scene);
+    if (scene && mode !== "long") fd.append("story", scene);
     if (own.length) fd.append("lines", $("lines").value.trim());
     const music = $("music").files[0];
     if (music) fd.append("music", music);
@@ -290,6 +317,10 @@
           continue;
         }
         if (st.status === "error") throw new Error(st.error || "Не удалось собрать ролик");
+        if (st.status === "done" && st.plan && st.plan.mode === "long") {
+          showLong(id, st.plan);
+          break;
+        }
         if (st.status === "done") {
           const vr = await fetch(`api/jobs/${id}/video`);
           if (!vr.ok) throw new Error("Ролик удалён с сервера, сделай заново");
@@ -298,7 +329,7 @@
         }
         $("statusText").textContent = st.status === "queued"
           ? `В очереди: ${st.position}-й. Можно заблокировать телефон`
-          : `Рисую ролик… ${st.seconds} сек. Можно заблокировать телефон`;
+          : `${st.stage || "Рисую ролик…"} · ${Math.floor(st.seconds / 60)} мин ${st.seconds % 60} сек. Можно заблокировать телефон`;
         await sleep(2500);
       }
     } catch (err) {
@@ -312,7 +343,30 @@
     }
   }
 
+  // Длинный ролик большой (60–100 МБ): не грузим его в память, а даём прямые ссылки
+  function showLong(id, plan) {
+    $("video").style.aspectRatio = "16 / 9";
+    $("video").removeAttribute("loop");
+    $("video").src = `api/jobs/${id}/video`;
+    $("download").href = `api/jobs/${id}/video`;
+    $("download").download = "whatif.mp4";
+    $("share").hidden = true;
+    $("thumb").src = `api/jobs/${id}/thumb`;
+    $("thumb").hidden = false;
+    $("thumbLink").href = `api/jobs/${id}/thumb`;
+    $("thumbRow").hidden = false;
+    renderMeta({ title: plan.title, description: plan.description, hashtags: plan.tags && plan.tags.length ? [plan.tags.join(", ")] : [] });
+    const m = $("meta").querySelectorAll("small");
+    if (m[2]) m[2].textContent = "Теги";
+    show("result", true);
+    $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   function showVideo(blob, plan, own) {
+    $("thumb").hidden = true;
+    $("thumbRow").hidden = true;
+    $("video").style.aspectRatio = "9 / 16";
+    $("video").setAttribute("loop", "");
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     videoUrl = URL.createObjectURL(blob);
     const name = `short-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.mp4`;
